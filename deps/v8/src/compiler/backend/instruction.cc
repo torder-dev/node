@@ -56,7 +56,6 @@ FlagsCondition CommuteFlagsCondition(FlagsCondition condition) {
     case kPositiveOrZero:
     case kNegative:
       UNREACHABLE();
-      break;
     case kEqual:
     case kNotEqual:
     case kOverflow:
@@ -230,6 +229,15 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
           break;
         case MachineRepresentation::kTagged:
           os << "|t";
+          break;
+        case MachineRepresentation::kCompressedSigned:
+          os << "|cs";
+          break;
+        case MachineRepresentation::kCompressedPointer:
+          os << "|cp";
+          break;
+        case MachineRepresentation::kCompressed:
+          os << "|c";
           break;
       }
       return os << "]";
@@ -642,7 +650,11 @@ std::ostream& operator<<(std::ostream& os,
   const InstructionSequence* code = printable_block.code_;
 
   os << "B" << block->rpo_number();
-  os << ": AO#" << block->ao_number();
+  if (block->ao_number().IsValid()) {
+    os << ": AO#" << block->ao_number();
+  } else {
+    os << ": AO#?";
+  }
   if (block->IsDeferred()) os << " (deferred)";
   if (!block->needs_frame()) os << " (no frame)";
   if (block->must_construct_frame()) os << " (construct frame)";
@@ -892,6 +904,9 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
     case MachineRepresentation::kFloat32:
     case MachineRepresentation::kFloat64:
     case MachineRepresentation::kSimd128:
+    case MachineRepresentation::kCompressedSigned:
+    case MachineRepresentation::kCompressedPointer:
+    case MachineRepresentation::kCompressed:
       return rep;
     case MachineRepresentation::kNone:
       break;

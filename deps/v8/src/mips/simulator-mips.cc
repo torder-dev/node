@@ -16,6 +16,7 @@
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
 #include "src/disasm.h"
+#include "src/heap/combined-heap.h"
 #include "src/macro-assembler.h"
 #include "src/mips/constants-mips.h"
 #include "src/ostreams.h"
@@ -367,7 +368,7 @@ void MipsDebugger::Debug() {
       v8::internal::EmbeddedVector<char, 256> buffer;
       dasm.InstructionDecode(buffer,
                              reinterpret_cast<byte*>(sim_->get_pc()));
-      PrintF("  0x%08x  %s\n", sim_->get_pc(), buffer.start());
+      PrintF("  0x%08x  %s\n", sim_->get_pc(), buffer.begin());
       last_pc = sim_->get_pc();
     }
     char* line = ReadLine("sim> ");
@@ -536,7 +537,8 @@ void MipsDebugger::Debug() {
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
           Object obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
-          if (obj.IsSmi() || current_heap->Contains(HeapObject::cast(obj))) {
+          if (obj.IsSmi() ||
+              IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
             PrintF(" (");
             if (obj.IsSmi()) {
               PrintF("smi %d", Smi::ToInt(obj));
@@ -594,7 +596,7 @@ void MipsDebugger::Debug() {
         while (cur < end) {
           dasm.InstructionDecode(buffer, cur);
           PrintF("  0x%08" PRIxPTR "  %s\n", reinterpret_cast<intptr_t>(cur),
-                 buffer.start());
+                 buffer.begin());
           cur += kInstrSize;
         }
       } else if (strcmp(cmd, "gdb") == 0) {
@@ -714,7 +716,7 @@ void MipsDebugger::Debug() {
         while (cur < end) {
           dasm.InstructionDecode(buffer, cur);
           PrintF("  0x%08" PRIxPTR "  %s\n", reinterpret_cast<intptr_t>(cur),
-                 buffer.start());
+                 buffer.begin());
           cur += kInstrSize;
         }
       } else if ((strcmp(cmd, "h") == 0) || (strcmp(cmd, "help") == 0)) {
@@ -6998,8 +7000,8 @@ void Simulator::InstructionDecode(Instruction* instr) {
   }
   if (::v8::internal::FLAG_trace_sim) {
     PrintF("  0x%08" PRIxPTR "  %-44s   %s\n",
-           reinterpret_cast<intptr_t>(instr), buffer.start(),
-           trace_buf_.start());
+           reinterpret_cast<intptr_t>(instr), buffer.begin(),
+           trace_buf_.begin());
   }
   if (!pc_modified_) {
     set_register(pc, reinterpret_cast<int32_t>(instr) + kInstrSize);

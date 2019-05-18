@@ -8,9 +8,9 @@
 #include "src/objects/fixed-array.h"
 
 #include "src/base/tsan.h"
-#include "src/conversions.h"
 #include "src/handles-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-inl.h"
 #include "src/objects/bigint.h"
 #include "src/objects/compressed-slots.h"
@@ -63,8 +63,29 @@ CAST_ACCESSOR(TemplateList)
 CAST_ACCESSOR(WeakFixedArray)
 CAST_ACCESSOR(WeakArrayList)
 
-SMI_ACCESSORS(FixedArrayBase, length, kLengthOffset)
 SYNCHRONIZED_SMI_ACCESSORS(FixedArrayBase, length, kLengthOffset)
+
+int FixedArrayBase::length() const {
+  DCHECK(!IsInRange(map()->instance_type(), FIRST_FIXED_TYPED_ARRAY_TYPE,
+                    LAST_FIXED_TYPED_ARRAY_TYPE));
+  Object value = READ_FIELD(*this, kLengthOffset);
+  return Smi::ToInt(value);
+}
+void FixedArrayBase::set_length(int value) {
+  DCHECK(!IsInRange(map()->instance_type(), FIRST_FIXED_TYPED_ARRAY_TYPE,
+                    LAST_FIXED_TYPED_ARRAY_TYPE));
+  WRITE_FIELD(*this, kLengthOffset, Smi::FromInt(value));
+}
+
+void FixedTypedArrayBase::set_number_of_elements_onheap_only(int value) {
+  WRITE_FIELD(*this, kLengthOffset, Smi::FromInt(value));
+}
+
+int FixedTypedArrayBase::number_of_elements_onheap_only() const {
+  Object value = READ_FIELD(*this, kLengthOffset);
+  return Smi::ToInt(value);
+}
+
 SMI_ACCESSORS(WeakFixedArray, length, kLengthOffset)
 SYNCHRONIZED_SMI_ACCESSORS(WeakFixedArray, length, kLengthOffset)
 
@@ -202,10 +223,27 @@ ObjectSlot FixedArray::RawFieldOfElementAt(int index) {
   return RawField(OffsetOfElementAt(index));
 }
 
-void FixedArray::MoveElements(Heap* heap, int dst_index, int src_index, int len,
-                              WriteBarrierMode mode) {
+void FixedArray::MoveElements(Isolate* isolate, int dst_index, int src_index,
+                              int len, WriteBarrierMode mode) {
+  if (len == 0) return;
+  DCHECK_LE(dst_index + len, length());
+  DCHECK_LE(src_index + len, length());
   DisallowHeapAllocation no_gc;
-  heap->MoveElements(*this, dst_index, src_index, len, mode);
+  ObjectSlot dst_slot(RawFieldOfElementAt(dst_index));
+  ObjectSlot src_slot(RawFieldOfElementAt(src_index));
+  isolate->heap()->MoveRange(*this, dst_slot, src_slot, len, mode);
+}
+
+void FixedArray::CopyElements(Isolate* isolate, int dst_index, FixedArray src,
+                              int src_index, int len, WriteBarrierMode mode) {
+  if (len == 0) return;
+  DCHECK_LE(dst_index + len, length());
+  DCHECK_LE(src_index + len, src.length());
+  DisallowHeapAllocation no_gc;
+
+  ObjectSlot dst_slot(RawFieldOfElementAt(dst_index));
+  ObjectSlot src_slot(src->RawFieldOfElementAt(src_index));
+  isolate->heap()->CopyRange(*this, dst_slot, src_slot, len, mode);
 }
 
 // Perform a binary search in a fixed array.
@@ -365,8 +403,9 @@ bool FixedDoubleArray::is_the_hole(int index) {
   return get_representation(index) == kHoleNanInt64;
 }
 
-void FixedDoubleArray::MoveElements(Heap* heap, int dst_index, int src_index,
-                                    int len, WriteBarrierMode mode) {
+void FixedDoubleArray::MoveElements(Isolate* isolate, int dst_index,
+                                    int src_index, int len,
+                                    WriteBarrierMode mode) {
   DCHECK_EQ(SKIP_WRITE_BARRIER, mode);
   double* data_start =
       reinterpret_cast<double*>(FIELD_ADDR(*this, kHeaderSize));
@@ -408,6 +447,19 @@ MaybeObjectSlot WeakFixedArray::RawFieldOfElementAt(int index) {
   return RawMaybeWeakField(OffsetOfElementAt(index));
 }
 
+void WeakFixedArray::CopyElements(Isolate* isolate, int dst_index,
+                                  WeakFixedArray src, int src_index, int len,
+                                  WriteBarrierMode mode) {
+  if (len == 0) return;
+  DCHECK_LE(dst_index + len, length());
+  DCHECK_LE(src_index + len, src.length());
+  DisallowHeapAllocation no_gc;
+
+  MaybeObjectSlot dst_slot(data_start() + dst_index);
+  MaybeObjectSlot src_slot(src->data_start() + src_index);
+  isolate->heap()->CopyRange(*this, dst_slot, src_slot, len, mode);
+}
+
 MaybeObject WeakArrayList::Get(int index) const {
   DCHECK(index >= 0 && index < this->capacity());
   return RELAXED_READ_WEAK_FIELD(*this, OffsetOfElementAt(index));
@@ -423,6 +475,19 @@ void WeakArrayList::Set(int index, MaybeObject value, WriteBarrierMode mode) {
 
 MaybeObjectSlot WeakArrayList::data_start() {
   return RawMaybeWeakField(kHeaderSize);
+}
+
+void WeakArrayList::CopyElements(Isolate* isolate, int dst_index,
+                                 WeakArrayList src, int src_index, int len,
+                                 WriteBarrierMode mode) {
+  if (len == 0) return;
+  DCHECK_LE(dst_index + len, capacity());
+  DCHECK_LE(src_index + len, src.capacity());
+  DisallowHeapAllocation no_gc;
+
+  MaybeObjectSlot dst_slot(data_start() + dst_index);
+  MaybeObjectSlot src_slot(src->data_start() + src_index);
+  isolate->heap()->CopyRange(*this, dst_slot, src_slot, len, mode);
 }
 
 HeapObject WeakArrayList::Iterator::Next() {
@@ -543,9 +608,9 @@ PodArray<T> PodArray<T>::cast(Object object) {
 // static
 template <class T>
 Handle<PodArray<T>> PodArray<T>::New(Isolate* isolate, int length,
-                                     PretenureFlag pretenure) {
+                                     AllocationType allocation) {
   return Handle<PodArray<T>>::cast(
-      isolate->factory()->NewByteArray(length * sizeof(T), pretenure));
+      isolate->factory()->NewByteArray(length * sizeof(T), allocation));
 }
 
 template <class T>
@@ -586,16 +651,11 @@ int FixedTypedArrayBase::ElementSize(InstanceType type) {
 
 int FixedTypedArrayBase::DataSize(InstanceType type) const {
   if (base_pointer() == Smi::kZero) return 0;
-  return length() * ElementSize(type);
+  return number_of_elements_onheap_only() * ElementSize(type);
 }
 
 int FixedTypedArrayBase::DataSize() const {
   return DataSize(map()->instance_type());
-}
-
-size_t FixedTypedArrayBase::ByteLength() const {
-  return static_cast<size_t>(length()) *
-         static_cast<size_t>(ElementSize(map()->instance_type()));
 }
 
 int FixedTypedArrayBase::size() const {
@@ -635,7 +695,9 @@ double Float64ArrayTraits::defaultValue() {
 
 template <class Traits>
 typename Traits::ElementType FixedTypedArray<Traits>::get_scalar(int index) {
-  DCHECK((index >= 0) && (index < this->length()));
+  // TODO(bmeurer, v8:4153): Solve this differently.
+  // DCHECK((index < this->length()));
+  CHECK_GE(index, 0);
   return FixedTypedArray<Traits>::get_scalar_from_data_ptr(DataPtr(), index);
 }
 
@@ -670,7 +732,9 @@ typename Traits::ElementType FixedTypedArray<Traits>::get_scalar_from_data_ptr(
 
 template <class Traits>
 void FixedTypedArray<Traits>::set(int index, ElementType value) {
-  CHECK((index >= 0) && (index < this->length()));
+  // TODO(bmeurer, v8:4153): Solve this differently.
+  // CHECK((index < this->length()));
+  CHECK_GE(index, 0);
   // See the comment in FixedTypedArray<Traits>::get_scalar.
   auto* ptr = reinterpret_cast<ElementType*>(DataPtr());
   TSAN_ANNOTATE_IGNORE_WRITES_BEGIN;

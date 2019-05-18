@@ -81,7 +81,7 @@ class Builtins {
   // Used by CreateOffHeapTrampolines in isolate.cc.
   void set_builtin(int index, Code builtin);
 
-  Code builtin(int index);
+  V8_EXPORT_PRIVATE Code builtin(int index);
   V8_EXPORT_PRIVATE Handle<Code> builtin_handle(int index);
 
   V8_EXPORT_PRIVATE static Callable CallableFor(Isolate* isolate, Name name);
@@ -172,7 +172,8 @@ class Builtins {
   // The result should not be used directly, but only from the related Factory
   // function.
   static Handle<Code> GenerateOffHeapTrampolineFor(Isolate* isolate,
-                                                   Address off_heap_entry);
+                                                   Address off_heap_entry,
+                                                   int32_t kind_specific_flags);
 
   // Generate the RelocInfo ByteArray that would be generated for an offheap
   // trampoline.

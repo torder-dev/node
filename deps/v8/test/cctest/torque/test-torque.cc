@@ -4,7 +4,7 @@
 
 #include <cmath>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/builtins/builtins-promise-gen.h"
 #include "src/builtins/builtins-string-gen.h"
@@ -19,7 +19,7 @@
 #include "src/objects/promise-inl.h"
 #include "test/cctest/compiler/code-assembler-tester.h"
 #include "test/cctest/compiler/function-tester.h"
-#include "torque-generated/builtins-test-from-dsl-gen.h"
+#include "torque-generated/builtins-test-gen-tq.h"
 
 namespace v8 {
 namespace internal {
@@ -31,10 +31,10 @@ typedef CodeAssemblerLabel Label;
 typedef CodeAssemblerVariable Variable;
 
 class TestTorqueAssembler : public CodeStubAssembler,
-                            public TestBuiltinsFromDSLAssembler {
+                            public TorqueGeneratedTestBuiltinsAssembler {
  public:
   explicit TestTorqueAssembler(CodeAssemblerState* state)
-      : CodeStubAssembler(state), TestBuiltinsFromDSLAssembler(state) {}
+      : CodeStubAssembler(state), TorqueGeneratedTestBuiltinsAssembler(state) {}
 };
 
 }  // namespace
@@ -449,6 +449,37 @@ TEST(TestInternalClass) {
   TestTorqueAssembler m(asm_tester.state());
   {
     m.TestInternalClass(m.UncheckedCast<Context>(m.HeapConstant(context)));
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+  ft.Call();
+}
+
+TEST(TestNewFixedArrayFromSpread) {
+  CcTest::InitializeVM();
+  Isolate* isolate(CcTest::i_isolate());
+  i::HandleScope scope(isolate);
+  Handle<Context> context =
+      Utils::OpenHandle(*v8::Isolate::GetCurrent()->GetCurrentContext());
+  CodeAssemblerTester asm_tester(isolate);
+  TestTorqueAssembler m(asm_tester.state());
+  {
+    m.TestNewFixedArrayFromSpread(
+        m.UncheckedCast<Context>(m.HeapConstant(context)));
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+  ft.Call();
+}
+
+TEST(TestReferences) {
+  CcTest::InitializeVM();
+  Isolate* isolate(CcTest::i_isolate());
+  i::HandleScope scope(isolate);
+  CodeAssemblerTester asm_tester(isolate);
+  TestTorqueAssembler m(asm_tester.state());
+  {
+    m.TestReferences();
     m.Return(m.UndefinedConstant());
   }
   FunctionTester ft(asm_tester.GenerateCode(), 0);

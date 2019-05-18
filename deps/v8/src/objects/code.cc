@@ -63,12 +63,10 @@ int Code::ExecutableInstructionSize() const { return safepoint_table_offset(); }
 
 void Code::ClearEmbeddedObjects(Heap* heap) {
   HeapObject undefined = ReadOnlyRoots(heap).undefined_value();
-  int mode_mask = RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT);
+  int mode_mask = RelocInfo::EmbeddedObjectModeMask();
   for (RelocIterator it(*this, mode_mask); !it.done(); it.next()) {
-    RelocInfo::Mode mode = it.rinfo()->rmode();
-    if (mode == RelocInfo::EMBEDDED_OBJECT) {
-      it.rinfo()->set_target_object(heap, undefined, SKIP_WRITE_BARRIER);
-    }
+    DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
+    it.rinfo()->set_target_object(heap, undefined, SKIP_WRITE_BARRIER);
   }
   set_embedded_objects_cleared(true);
 }
@@ -107,7 +105,7 @@ void Code::CopyFromNoFlush(Heap* heap, const CodeDesc& desc) {
   const int mode_mask = RelocInfo::PostCodegenRelocationMask();
   for (RelocIterator it(*this, mode_mask); !it.done(); it.next()) {
     RelocInfo::Mode mode = it.rinfo()->rmode();
-    if (mode == RelocInfo::EMBEDDED_OBJECT) {
+    if (RelocInfo::IsEmbeddedObjectMode(mode)) {
       Handle<HeapObject> p = it.rinfo()->target_object_handle(origin);
       it.rinfo()->set_target_object(heap, *p, UPDATE_WRITE_BARRIER,
                                     SKIP_ICACHE_FLUSH);
@@ -162,12 +160,13 @@ template <typename Code>
 void SetStackFrameCacheCommon(Isolate* isolate, Handle<Code> code,
                               Handle<SimpleNumberDictionary> cache) {
   Handle<Object> maybe_table(code->source_position_table(), isolate);
+  if (maybe_table->IsException(isolate) || maybe_table->IsUndefined()) return;
   if (maybe_table->IsSourcePositionTableWithFrameCache()) {
     Handle<SourcePositionTableWithFrameCache>::cast(maybe_table)
         ->set_stack_frame_cache(*cache);
     return;
   }
-  DCHECK(maybe_table->IsUndefined() || maybe_table->IsByteArray());
+  DCHECK(maybe_table->IsByteArray());
   Handle<ByteArray> table(Handle<ByteArray>::cast(maybe_table));
   Handle<SourcePositionTableWithFrameCache> table_with_cache =
       isolate->factory()->NewSourcePositionTableWithFrameCache(table, cache);
@@ -211,10 +210,14 @@ void AbstractCode::DropStackFrameCache() {
 }
 
 int AbstractCode::SourcePosition(int offset) {
+  Object maybe_table = source_position_table();
+  if (maybe_table->IsException()) return kNoSourcePosition;
+
+  ByteArray source_position_table = ByteArray::cast(maybe_table);
   int position = 0;
   // Subtract one because the current PC is one instruction after the call site.
   if (IsCode()) offset--;
-  for (SourcePositionTableIterator iterator(source_position_table());
+  for (SourcePositionTableIterator iterator(source_position_table);
        !iterator.done() && iterator.code_offset() <= offset;
        iterator.Advance()) {
     position = iterator.source_position().ScriptOffset();
@@ -297,7 +300,8 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
   STATIC_ASSERT(mode_mask ==
                 (RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
                  RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET) |
-                 RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
+                 RelocInfo::ModeMask(RelocInfo::COMPRESSED_EMBEDDED_OBJECT) |
+                 RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
                  RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
@@ -376,9 +380,9 @@ Code Code::OptimizedCodeIterator::Next() {
 
 Handle<DeoptimizationData> DeoptimizationData::New(Isolate* isolate,
                                                    int deopt_entry_count,
-                                                   PretenureFlag pretenure) {
+                                                   AllocationType allocation) {
   return Handle<DeoptimizationData>::cast(isolate->factory()->NewFixedArray(
-      LengthFor(deopt_entry_count), pretenure));
+      LengthFor(deopt_entry_count), allocation));
 }
 
 Handle<DeoptimizationData> DeoptimizationData::Empty(Isolate* isolate) {
@@ -700,7 +704,7 @@ void Code::Disassemble(const char* name, std::ostream& os, Address current_pc) {
                                                   constant_pool_offset());
       for (int i = 0; i < pool_size; i += kSystemPointerSize, ptr++) {
         SNPrintF(buf, "%4d %08" V8PRIxPTR, i, *ptr);
-        os << static_cast<const void*>(ptr) << "  " << buf.start() << "\n";
+        os << static_cast<const void*>(ptr) << "  " << buf.begin() << "\n";
       }
     }
   }
@@ -708,7 +712,8 @@ void Code::Disassemble(const char* name, std::ostream& os, Address current_pc) {
 
   {
     SourcePositionTableIterator it(
-        SourcePositionTable(), SourcePositionTableIterator::kJavaScriptOnly);
+        SourcePositionTableIfCollected(),
+        SourcePositionTableIterator::kJavaScriptOnly);
     if (!it.done()) {
       os << "Source positions:\n pc offset  position\n";
       for (; !it.done(); it.Advance()) {
@@ -721,7 +726,7 @@ void Code::Disassemble(const char* name, std::ostream& os, Address current_pc) {
   }
 
   {
-    SourcePositionTableIterator it(SourcePositionTable(),
+    SourcePositionTableIterator it(SourcePositionTableIfCollected(),
                                    SourcePositionTableIterator::kExternalOnly);
     if (!it.done()) {
       os << "External Source positions:\n pc offset  fileid  line\n";
@@ -791,7 +796,7 @@ void Code::Disassemble(const char* name, std::ostream& os, Address current_pc) {
   }
 
   if (has_code_comments()) {
-    PrintCodeCommentsSection(os, code_comments());
+    PrintCodeCommentsSection(os, code_comments(), code_comments_size());
   }
 }
 #endif  // ENABLE_DISASSEMBLER
@@ -804,7 +809,8 @@ void BytecodeArray::Disassemble(std::ostream& os) {
   os << "Frame size " << frame_size() << "\n";
 
   Address base_address = GetFirstBytecodeAddress();
-  SourcePositionTableIterator source_positions(SourcePositionTable());
+  SourcePositionTableIterator source_positions(
+      SourcePositionTableIfCollected());
 
   // Storage for backing the handle passed to the iterator. This handle won't be
   // updated by the gc, but that's ok because we've disallowed GCs anyway.
@@ -965,8 +971,9 @@ Handle<DependentCode> DependentCode::New(Isolate* isolate,
                                          DependencyGroup group,
                                          const MaybeObjectHandle& object,
                                          Handle<DependentCode> next) {
-  Handle<DependentCode> result = Handle<DependentCode>::cast(
-      isolate->factory()->NewWeakFixedArray(kCodesStartIndex + 1, TENURED));
+  Handle<DependentCode> result =
+      Handle<DependentCode>::cast(isolate->factory()->NewWeakFixedArray(
+          kCodesStartIndex + 1, AllocationType::kOld));
   result->set_next_link(*next);
   result->set_flags(GroupField::encode(group) | CountField::encode(1));
   result->set_object_at(0, *object);
@@ -979,7 +986,8 @@ Handle<DependentCode> DependentCode::EnsureSpace(
   int capacity = kCodesStartIndex + DependentCode::Grow(entries->count());
   int grow_by = capacity - entries->length();
   return Handle<DependentCode>::cast(
-      isolate->factory()->CopyWeakFixedArrayAndGrow(entries, grow_by, TENURED));
+      isolate->factory()->CopyWeakFixedArrayAndGrow(entries, grow_by,
+                                                    AllocationType::kOld));
 }
 
 bool DependentCode::Compact() {

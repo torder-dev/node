@@ -19,7 +19,7 @@ namespace typed_array {
     // Calculates the maximum number of elements supported by a specified number
     // of bytes.
     CalculateLength(byteLength: uintptr): PositiveSmi labels IfInvalid {
-      return TryUintPtrToPositiveSmi(byteLength >>> this.sizeLog2)
+      return Convert<PositiveSmi>(byteLength >>> this.sizeLog2)
           otherwise IfInvalid;
     }
 
@@ -111,9 +111,9 @@ namespace typed_array {
       AttachedJSTypedArrayWitness {
     const kind = array.elements_kind;
     return AttachedJSTypedArrayWitness{
-      array,
-      array,
-      GetLoadFnForElementsKind(kind)
+      stable: array,
+      unstable: array,
+      loadfn: GetLoadFnForElementsKind(kind)
     };
   }
 
@@ -298,7 +298,8 @@ namespace typed_array {
     }
 
     // 4. Let len be obj.[[ArrayLength]].
-    const len: Smi = array.length;
+    // TODO(v8:4153): Support huge TypedArrays here.
+    const len = Cast<Smi>(Convert<Number>(array.length)) otherwise unreachable;
 
     // Arrays of length 1 or less are considered sorted.
     if (len < 2) return array;

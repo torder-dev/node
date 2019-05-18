@@ -291,10 +291,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   void VisitArgumentsObject(Variable* variable);
   void VisitRestArgumentsArray(Variable* rest);
   void VisitCallSuper(Call* call);
+  void BuildPrivateClassMemberNameAssignment(ClassLiteral::Property* property);
   void BuildClassLiteral(ClassLiteral* expr, Register name);
   void VisitClassLiteral(ClassLiteral* expr, Register name);
   void VisitNewTargetVariable(Variable* variable);
   void VisitThisFunctionVariable(Variable* variable);
+  void BuildPrivateBrandInitialization(Register receiver);
   void BuildInstanceMemberInitialization(Register constructor,
                                          Register instance);
   void BuildGeneratorObjectVariableInitialization();
@@ -384,12 +386,13 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
                                          Variable* variable);
   FeedbackSlot GetCachedStoreGlobalICSlot(LanguageMode language_mode,
                                           Variable* variable);
-  FeedbackSlot GetCachedCreateClosureSlot(FunctionLiteral* literal);
   FeedbackSlot GetCachedLoadICSlot(const Expression* expr,
                                    const AstRawString* name);
   FeedbackSlot GetCachedStoreICSlot(const Expression* expr,
                                     const AstRawString* name);
   FeedbackSlot GetDummyCompareICSlot();
+
+  int GetCachedCreateClosureSlot(FunctionLiteral* literal);
 
   void AddToEagerLiteralsIfEager(FunctionLiteral* literal);
 

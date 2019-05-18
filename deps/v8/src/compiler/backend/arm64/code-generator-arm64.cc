@@ -260,16 +260,14 @@ namespace {
 
 class OutOfLineRecordWrite final : public OutOfLineCode {
  public:
-  OutOfLineRecordWrite(CodeGenerator* gen, Register object, Operand index,
-                       Register value, Register scratch0, Register scratch1,
-                       RecordWriteMode mode, StubCallMode stub_mode,
+  OutOfLineRecordWrite(CodeGenerator* gen, Register object, Operand offset,
+                       Register value, RecordWriteMode mode,
+                       StubCallMode stub_mode,
                        UnwindingInfoWriter* unwinding_info_writer)
       : OutOfLineCode(gen),
         object_(object),
-        index_(index),
+        offset_(offset),
         value_(value),
-        scratch0_(scratch0),
-        scratch1_(scratch1),
         mode_(mode),
         stub_mode_(stub_mode),
         must_save_lr_(!gen->frame_access_state()->has_frame()),
@@ -280,10 +278,11 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     if (mode_ > RecordWriteMode::kValueIsPointer) {
       __ JumpIfSmi(value_, exit());
     }
-    __ CheckPageFlagClear(value_, scratch0_,
-                          MemoryChunk::kPointersToHereAreInterestingMask,
-                          exit());
-    __ Add(scratch1_, object_, index_);
+    if (COMPRESS_POINTERS_BOOL) {
+      __ DecompressTaggedPointer(value_, value_);
+    }
+    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, ne,
+                     exit());
     RememberedSetAction const remembered_set_action =
         mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
                                              : OMIT_REMEMBERED_SET;
@@ -294,14 +293,16 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       __ Push(lr, padreg);
       unwinding_info_writer_->MarkLinkRegisterOnTopOfStack(__ pc_offset(), sp);
     }
-    if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
+    if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
+      __ CallEphemeronKeyBarrier(object_, offset_, save_fp_mode);
+    } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
       // Just encode the stub index. This will be patched when the code
       // is added to the native module and copied into wasm code space.
-      __ CallRecordWriteStub(object_, scratch1_, remembered_set_action,
+      __ CallRecordWriteStub(object_, offset_, remembered_set_action,
                              save_fp_mode, wasm::WasmCode::kWasmRecordWrite);
     } else {
-      __ CallRecordWriteStub(object_, scratch1_, remembered_set_action,
+      __ CallRecordWriteStub(object_, offset_, remembered_set_action,
                              save_fp_mode);
     }
     if (must_save_lr_) {
@@ -312,10 +313,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 
  private:
   Register const object_;
-  Operand const index_;
+  Operand const offset_;
   Register const value_;
-  Register const scratch0_;
-  Register const scratch1_;
   RecordWriteMode const mode_;
   StubCallMode const stub_mode_;
   bool must_save_lr_;
@@ -567,10 +566,10 @@ void CodeGenerator::BailoutIfDeoptimized() {
   int offset = Code::kCodeDataContainerOffset - Code::kHeaderSize;
   __ LoadTaggedPointerField(
       scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
-  __ Ldr(scratch,
+  __ Ldr(scratch.W(),
          FieldMemOperand(scratch, CodeDataContainer::kKindSpecificFlagsOffset));
   Label not_deoptimized;
-  __ Tbz(scratch, Code::kMarkedForDeoptimizationBit, &not_deoptimized);
+  __ Tbz(scratch.W(), Code::kMarkedForDeoptimizationBit, &not_deoptimized);
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET);
   __ Bind(&not_deoptimized);
@@ -715,7 +714,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // by an unknown value, and it is safe to continue accessing the frame
       // via the stack pointer.
       UNREACHABLE();
-      break;
     case kArchSaveCallerRegisters: {
       fp_mode_ =
           static_cast<SaveFPRegsMode>(MiscField::decode(instr->opcode()));
@@ -846,23 +844,23 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       AddressingMode addressing_mode =
           AddressingModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
-      Operand index(0);
+      Operand offset(0);
       if (addressing_mode == kMode_MRI) {
-        index = Operand(i.InputInt64(1));
+        offset = Operand(i.InputInt64(1));
       } else {
         DCHECK_EQ(addressing_mode, kMode_MRR);
-        index = Operand(i.InputRegister(1));
+        offset = Operand(i.InputRegister(1));
       }
       Register value = i.InputRegister(2);
-      Register scratch0 = i.TempRegister(0);
-      Register scratch1 = i.TempRegister(1);
       auto ool = new (zone()) OutOfLineRecordWrite(
-          this, object, index, value, scratch0, scratch1, mode,
-          DetermineStubCallMode(), &unwinding_info_writer_);
-      __ StoreTaggedField(value, MemOperand(object, index));
-      __ CheckPageFlagSet(object, scratch0,
-                          MemoryChunk::kPointersFromHereAreInterestingMask,
-                          ool->entry());
+          this, object, offset, value, mode, DetermineStubCallMode(),
+          &unwinding_info_writer_);
+      __ StoreTaggedField(value, MemOperand(object, offset));
+      if (COMPRESS_POINTERS_BOOL) {
+        __ DecompressTaggedPointer(object, object);
+      }
+      __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
+                       eq, ool->entry());
       __ Bind(ool->exit());
       break;
     }
@@ -1341,6 +1339,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float32Sqrt:
       __ Fsqrt(i.OutputFloat32Register(), i.InputFloat32Register(0));
       break;
+    case kArm64Float32Fnmul: {
+      __ Fnmul(i.OutputFloat32Register(), i.InputFloat32Register(0),
+               i.InputFloat32Register(1));
+      break;
+    }
     case kArm64Float64Cmp:
       if (instr->InputAt(1)->IsFPRegister()) {
         __ Fcmp(i.InputDoubleRegister(0), i.InputDoubleRegister(1));
@@ -1405,6 +1408,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kArm64Float64Sqrt:
       __ Fsqrt(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      break;
+    case kArm64Float64Fnmul:
+      __ Fnmul(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+               i.InputDoubleRegister(1));
       break;
     case kArm64Float32ToFloat64:
       __ Fcvt(i.OutputDoubleRegister(), i.InputDoubleRegister(0).S());
@@ -1572,6 +1579,33 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Str:
       __ Str(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
       break;
+    case kArm64DecompressSigned: {
+      __ DecompressTaggedSigned(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
+    case kArm64DecompressPointer: {
+      __ DecompressTaggedPointer(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
+    case kArm64DecompressAny: {
+      __ DecompressAnyTagged(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
+    // TODO(solanes): Combine into one Compress? They seem to be identical.
+    // TODO(solanes): We might get away with doing a no-op in these three cases.
+    // The Uxtw instruction is the conservative way for the moment.
+    case kArm64CompressSigned: {
+      __ Uxtw(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
+    case kArm64CompressPointer: {
+      __ Uxtw(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
+    case kArm64CompressAny: {
+      __ Uxtw(i.OutputRegister(), i.InputRegister(0));
+      break;
+    }
     case kArm64LdrS:
       __ Ldr(i.OutputDoubleRegister().S(), i.MemoryOperand());
       break;
@@ -2808,7 +2842,6 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
     }
     default:
       UNREACHABLE();
-      break;
   }
 }
 

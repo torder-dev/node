@@ -7,11 +7,11 @@
 #include <iomanip>
 #include <memory>
 
-#include "src/bootstrapper.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/heap/heap-inl.h"                // For InOldSpace.
 #include "src/heap/heap-write-barrier-inl.h"  // For GetIsolateFromWritableObj.
+#include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/objects-inl.h"
 #include "src/objects/arguments-inl.h"
@@ -98,7 +98,9 @@ void HeapObject::PrintHeader(std::ostream& os, const char* id) {  // NOLINT
     os << map()->instance_type();
   }
   os << "]";
-  if (GetHeapFromWritableObject(*this)->InOldSpace(*this)) {
+  if (ReadOnlyHeap::Contains(*this)) {
+    os << " in ReadOnlySpace";
+  } else if (GetHeapFromWritableObject(*this)->InOldSpace(*this)) {
     os << " in OldSpace";
   }
   if (!IsMap()) os << "\n - map: " << Brief(map());
@@ -197,6 +199,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case FEEDBACK_CELL_TYPE:
       FeedbackCell::cast(*this)->FeedbackCellPrint(os);
       break;
+    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
+      ClosureFeedbackCellArray::cast(*this)->ClosureFeedbackCellArrayPrint(os);
+      break;
     case FEEDBACK_VECTOR_TYPE:
       FeedbackVector::cast(*this)->FeedbackVectorPrint(os);
       break;
@@ -225,13 +230,19 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case JS_ERROR_TYPE:
     // TODO(titzer): debug printing for more wasm objects
     case WASM_EXCEPTION_TYPE:
-    case WASM_GLOBAL_TYPE:
-    case WASM_MEMORY_TYPE:
-    case WASM_TABLE_TYPE:
       JSObject::cast(*this)->JSObjectPrint(os);
       break;
     case WASM_MODULE_TYPE:
       WasmModuleObject::cast(*this)->WasmModuleObjectPrint(os);
+      break;
+    case WASM_MEMORY_TYPE:
+      WasmMemoryObject::cast(*this)->WasmMemoryObjectPrint(os);
+      break;
+    case WASM_TABLE_TYPE:
+      WasmTableObject::cast(*this)->WasmTableObjectPrint(os);
+      break;
+    case WASM_GLOBAL_TYPE:
+      WasmGlobalObject::cast(*this)->WasmGlobalObjectPrint(os);
       break;
     case WASM_INSTANCE_TYPE:
       WasmInstanceObject::cast(*this)->WasmInstanceObjectPrint(os);
@@ -445,7 +456,6 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
       // TODO(all): Handle these types too.
       os << "UNKNOWN TYPE " << map()->instance_type();
       UNREACHABLE();
-      break;
   }
 }
 
@@ -472,7 +482,8 @@ template <class Traits>
 void FixedTypedArray<Traits>::FixedTypedArrayPrint(
     std::ostream& os) {  // NOLINT
   PrintHeader(os, Traits::ArrayTypeName());
-  os << "\n - length: " << length() << "\n - base_pointer: ";
+  os << "\n - length: " << number_of_elements_onheap_only()
+     << "\n - base_pointer: ";
   if (base_pointer().ptr() == kNullAddress) {
     os << "<nullptr>";
   } else {
@@ -544,18 +555,18 @@ double GetScalarElement(T array, int index) {
 }
 
 template <class T>
-void DoPrintElements(std::ostream& os, Object object) {  // NOLINT
+void DoPrintElements(std::ostream& os, Object object, int length) {  // NOLINT
   const bool print_the_hole = std::is_same<T, FixedDoubleArray>::value;
   T array = T::cast(object);
-  if (array->length() == 0) return;
+  if (length == 0) return;
   int previous_index = 0;
   double previous_value = GetScalarElement(array, 0);
   double value = 0.0;
   int i;
-  for (i = 1; i <= array->length(); i++) {
-    if (i < array->length()) value = GetScalarElement(array, i);
+  for (i = 1; i <= length; i++) {
+    if (i < length) value = GetScalarElement(array, i);
     bool values_are_nan = std::isnan(previous_value) && std::isnan(value);
-    if (i != array->length() && (previous_value == value || values_are_nan) &&
+    if (i != length && (previous_value == value || values_are_nan) &&
         IsTheHoleAt(array, i - 1) == IsTheHoleAt(array, i)) {
       continue;
     }
@@ -656,29 +667,31 @@ void JSObject::PrintElements(std::ostream& os) {  // NOLINT
   // Don't call GetElementsKind, its validation code can cause the printer to
   // fail when debugging.
   os << " - elements: " << Brief(elements()) << " {";
-  if (elements()->length() == 0) {
-    os << " }\n";
-    return;
-  }
   switch (map()->elements_kind()) {
     case HOLEY_SMI_ELEMENTS:
     case PACKED_SMI_ELEMENTS:
     case HOLEY_ELEMENTS:
+    case HOLEY_FROZEN_ELEMENTS:
+    case HOLEY_SEALED_ELEMENTS:
     case PACKED_ELEMENTS:
+    case PACKED_FROZEN_ELEMENTS:
+    case PACKED_SEALED_ELEMENTS:
     case FAST_STRING_WRAPPER_ELEMENTS: {
       PrintFixedArrayElements(os, FixedArray::cast(elements()));
       break;
     }
     case HOLEY_DOUBLE_ELEMENTS:
     case PACKED_DOUBLE_ELEMENTS: {
-      DoPrintElements<FixedDoubleArray>(os, elements());
+      DoPrintElements<FixedDoubleArray>(os, elements(), elements()->length());
       break;
     }
 
-#define PRINT_ELEMENTS(Type, type, TYPE, elementType)    \
-  case TYPE##_ELEMENTS: {                                \
-    DoPrintElements<Fixed##Type##Array>(os, elements()); \
-    break;                                               \
+    // TODO(bmeurer, v8:4153): Change this to size_t later.
+#define PRINT_ELEMENTS(Type, type, TYPE, elementType)                   \
+  case TYPE##_ELEMENTS: {                                               \
+    int length = static_cast<int>(JSTypedArray::cast(*this)->length()); \
+    DoPrintElements<Fixed##Type##Array>(os, elements(), length);        \
+    break;                                                              \
   }
       TYPED_ARRAYS(PRINT_ELEMENTS)
 #undef PRINT_ELEMENTS
@@ -736,8 +749,12 @@ static void JSObjectPrintBody(std::ostream& os,
   os << " {";
   if (obj->PrintProperties(os)) os << "\n ";
   os << "}\n";
-  if (print_elements && obj->elements()->length() > 0) {
-    obj->PrintElements(os);
+  if (print_elements) {
+    int length = obj->HasFixedTypedArrayElements()
+                     ? FixedTypedArrayBase::cast(obj->elements())
+                           ->number_of_elements_onheap_only()
+                     : obj->elements()->length();
+    if (length > 0) obj->PrintElements(os);
   }
   int embedder_fields = obj->GetEmbedderFieldCount();
   if (embedder_fields > 0) {
@@ -1006,7 +1023,7 @@ void PropertyArray::PropertyArrayPrint(std::ostream& os) {  // NOLINT
 void FixedDoubleArray::FixedDoubleArrayPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "FixedDoubleArray");
   os << "\n - length: " << length();
-  DoPrintElements<FixedDoubleArray>(os, *this);
+  DoPrintElements<FixedDoubleArray>(os, *this, length());
   os << "\n";
 }
 
@@ -1083,6 +1100,10 @@ void FeedbackMetadata::FeedbackMetadataPrint(std::ostream& os) {
     os << "\n Slot " << slot << " " << kind;
   }
   os << "\n";
+}
+
+void ClosureFeedbackCellArray::ClosureFeedbackCellArrayPrint(std::ostream& os) {
+  PrintFixedArrayWithHeader(os, *this, "ClosureFeedbackCellArray");
 }
 
 void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {  // NOLINT
@@ -1162,14 +1183,12 @@ void FeedbackNexus::Print(std::ostream& os) {  // NOLINT
       os << "ForIn:" << GetForInFeedback();
       break;
     }
-    case FeedbackSlotKind::kCreateClosure:
     case FeedbackSlotKind::kLiteral:
     case FeedbackSlotKind::kTypeProfile:
       break;
     case FeedbackSlotKind::kInvalid:
     case FeedbackSlotKind::kKindsNumber:
       UNREACHABLE();
-      break;
   }
 }
 
@@ -1252,7 +1271,7 @@ void JSDate::JSDatePrint(std::ostream& os) {  // NOLINT
              hour()->IsSmi() ? Smi::ToInt(hour()) : -1,
              min()->IsSmi() ? Smi::ToInt(min()) : -1,
              sec()->IsSmi() ? Smi::ToInt(sec()) : -1);
-    os << buf.start();
+    os << buf.begin();
   }
   JSObjectPrintBody(os, *this);
 }
@@ -1357,7 +1376,6 @@ void JSArrayBuffer::JSArrayBufferPrint(std::ostream& os) {  // NOLINT
   if (was_detached()) os << "\n - detached";
   if (is_shared()) os << "\n - shared";
   if (is_wasm_memory()) os << "\n - is_wasm_memory";
-  if (is_growable()) os << "\n - growable";
   JSObjectPrintBody(os, *this, !was_detached());
 }
 
@@ -1366,7 +1384,7 @@ void JSTypedArray::JSTypedArrayPrint(std::ostream& os) {  // NOLINT
   os << "\n - buffer: " << Brief(buffer());
   os << "\n - byte_offset: " << byte_offset();
   os << "\n - byte_length: " << byte_length();
-  os << "\n - length: " << Brief(length());
+  os << "\n - length: " << length();
   if (!buffer()->IsJSArrayBuffer()) {
     os << "\n <invalid buffer>\n";
     return;
@@ -1760,21 +1778,6 @@ void PrototypeInfo::PrototypeInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n";
 }
 
-void Tuple2::Tuple2Print(std::ostream& os) {  // NOLINT
-  PrintHeader(os, "Tuple2");
-  os << "\n - value1: " << Brief(value1());
-  os << "\n - value2: " << Brief(value2());
-  os << "\n";
-}
-
-void Tuple3::Tuple3Print(std::ostream& os) {  // NOLINT
-  PrintHeader(os, "Tuple3");
-  os << "\n - value1: " << Brief(value1());
-  os << "\n - value2: " << Brief(value2());
-  os << "\n - value3: " << Brief(value3());
-  os << "\n";
-}
-
 void ClassPositions::ClassPositionsPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "ClassPositions");
   os << "\n - start position: " << start();
@@ -1812,7 +1815,7 @@ void WasmExceptionTag::WasmExceptionTagPrint(std::ostream& os) {  // NOLINT
 }
 
 void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {  // NOLINT
-  PrintHeader(os, "WasmInstanceObject");
+  JSObjectPrintHeader(os, *this, "WasmInstanceObject");
   os << "\n - module_object: " << Brief(module_object());
   os << "\n - exports_object: " << Brief(exports_object());
   os << "\n - native_context: " << Brief(native_context());
@@ -1832,8 +1835,8 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {  // NOLINT
   if (has_debug_info()) {
     os << "\n - debug_info: " << Brief(debug_info());
   }
-  if (has_table_object()) {
-    os << "\n - table_object: " << Brief(table_object());
+  for (int i = 0; i < tables()->length(); i++) {
+    os << "\n - table " << i << ": " << Brief(tables()->get(i));
   }
   os << "\n - imported_function_refs: " << Brief(imported_function_refs());
   if (has_indirect_function_table_refs()) {
@@ -1857,6 +1860,7 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {  // NOLINT
      << static_cast<void*>(indirect_function_table_sig_ids());
   os << "\n - indirect_function_table_targets: "
      << static_cast<void*>(indirect_function_table_targets());
+  JSObjectPrintBody(os, *this);
   os << "\n";
 }
 
@@ -1865,6 +1869,7 @@ void WasmExportedFunctionData::WasmExportedFunctionDataPrint(
   PrintHeader(os, "WasmExportedFunctionData");
   os << "\n - wrapper_code: " << Brief(wrapper_code());
   os << "\n - instance: " << Brief(instance());
+  os << "\n - jump_table_offset: " << jump_table_offset();
   os << "\n - function_index: " << function_index();
   os << "\n";
 }
@@ -1881,6 +1886,42 @@ void WasmModuleObject::WasmModuleObjectPrint(std::ostream& os) {  // NOLINT
   if (has_breakpoint_infos()) {
     os << "\n - breakpoint_infos: " << Brief(breakpoint_infos());
   }
+  os << "\n";
+}
+
+void WasmTableObject::WasmTableObjectPrint(std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmTableObject");
+  os << "\n - elements: " << Brief(elements());
+  os << "\n - maximum_length: " << Brief(maximum_length());
+  os << "\n - dispatch_tables: " << Brief(dispatch_tables());
+  os << "\n - raw_type: " << raw_type();
+  os << "\n";
+}
+
+void WasmGlobalObject::WasmGlobalObjectPrint(std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmGlobalObject");
+  os << "\n - untagged_buffer: " << Brief(untagged_buffer());
+  os << "\n - tagged_buffer: " << Brief(tagged_buffer());
+  os << "\n - offset: " << offset();
+  os << "\n - flags: " << flags();
+  os << "\n - type: " << type();
+  os << "\n - is_mutable: " << is_mutable();
+  os << "\n";
+}
+
+void WasmMemoryObject::WasmMemoryObjectPrint(std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmMemoryObject");
+  os << "\n - array_buffer: " << Brief(array_buffer());
+  os << "\n - maximum_pages: " << maximum_pages();
+  os << "\n - instances: " << Brief(instances());
+  os << "\n";
+}
+
+void WasmExceptionObject::WasmExceptionObjectPrint(
+    std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmExceptionObject");
+  os << "\n - serialized_signature: " << Brief(serialized_signature());
+  os << "\n - exception_tag: " << Brief(exception_tag());
   os << "\n";
 }
 
@@ -1993,6 +2034,16 @@ void FunctionTemplateRareData::FunctionTemplateRareDataPrint(
   os << "\n";
 }
 
+void WasmCapiFunctionData::WasmCapiFunctionDataPrint(
+    std::ostream& os) {  // NOLINT
+  PrintHeader(os, "WasmCapiFunctionData");
+  os << "\n - call_target: " << call_target();
+  os << "\n - embedder_data: " << embedder_data();
+  os << "\n - wrapper_code: " << Brief(wrapper_code());
+  os << "\n - serialized_signature: " << Brief(serialized_signature());
+  os << "\n";
+}
+
 void ObjectTemplateInfo::ObjectTemplateInfoPrint(std::ostream& os) {  // NOLINT
   PrintHeader(os, "ObjectTemplateInfo");
   os << "\n - tag: " << Brief(tag());
@@ -2089,6 +2140,7 @@ void JSDateTimeFormat::JSDateTimeFormatPrint(std::ostream& os) {  // NOLINT
   JSObjectPrintHeader(os, *this, "JSDateTimeFormat");
   os << "\n - icu locale: " << Brief(icu_locale());
   os << "\n - icu simple date format: " << Brief(icu_simple_date_format());
+  os << "\n - icu date interval format: " << Brief(icu_date_interval_format());
   os << "\n - bound format: " << Brief(bound_format());
   os << "\n - hour cycle: " << HourCycleAsString();
   JSObjectPrintBody(os, *this);
@@ -2112,10 +2164,8 @@ void JSLocale::JSLocalePrint(std::ostream& os) {  // NOLINT
 void JSNumberFormat::JSNumberFormatPrint(std::ostream& os) {  // NOLINT
   JSObjectPrintHeader(os, *this, "JSNumberFormat");
   os << "\n - locale: " << Brief(locale());
-  os << "\n - icu_number_format: " << Brief(icu_number_format());
+  os << "\n - icu_number_formatter: " << Brief(icu_number_formatter());
   os << "\n - bound_format: " << Brief(bound_format());
-  os << "\n - style: " << StyleAsString();
-  os << "\n - currency_display: " << CurrencyDisplayAsString();
   JSObjectPrintBody(os, *this);
 }
 
@@ -2193,6 +2243,7 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {  // NOLINT
   if (HasReceiver()) {
     os << "\n - receiver: " << ReceiverVariableField::decode(flags);
   }
+  if (HasClassBrand()) os << "\n - has class brand";
   if (HasNewTarget()) os << "\n - needs new target";
   if (HasFunctionName()) {
     os << "\n - function name(" << FunctionVariableField::decode(flags)
@@ -2342,13 +2393,15 @@ void InterpreterData::InterpreterDataPrint(std::ostream& os) {  // NOLINT
   os << "\n";
 }
 
-void MaybeObject::Print() {
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void TaggedImpl<kRefType, StorageType>::Print() {
   StdoutStream os;
   this->Print(os);
   os << std::flush;
 }
 
-void MaybeObject::Print(std::ostream& os) {
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void TaggedImpl<kRefType, StorageType>::Print(std::ostream& os) {
   Smi smi;
   HeapObject heap_object;
   if (ToSmi(&smi)) {
@@ -2692,6 +2745,10 @@ inline i::Object GetObjectFromRaw(void* object) {
 //
 // The following functions are used by our gdb macros.
 //
+V8_EXPORT_PRIVATE extern i::Object _v8_internal_Get_Object(void* object) {
+  return GetObjectFromRaw(object);
+}
+
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object(void* object) {
   GetObjectFromRaw(object)->Print();
 }
@@ -2700,12 +2757,15 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
   i::Address address = reinterpret_cast<i::Address>(object);
   i::Isolate* isolate = i::Isolate::Current();
 
-  i::wasm::WasmCode* wasm_code =
-      isolate->wasm_engine()->code_manager()->LookupCode(address);
-  if (wasm_code) {
-    i::StdoutStream os;
-    wasm_code->Disassemble(nullptr, os, address);
-    return;
+  {
+    i::wasm::WasmCodeRefScope scope;
+    i::wasm::WasmCode* wasm_code =
+        isolate->wasm_engine()->code_manager()->LookupCode(address);
+    if (wasm_code) {
+      i::StdoutStream os;
+      wasm_code->Disassemble(nullptr, os, address);
+      return;
+    }
   }
 
   if (!isolate->heap()->InSpaceSlow(address, i::CODE_SPACE) &&

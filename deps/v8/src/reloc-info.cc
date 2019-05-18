@@ -149,7 +149,7 @@ void RelocInfoWriter::Write(const RelocInfo* rinfo) {
       static_cast<uint32_t>(rinfo->pc() - reinterpret_cast<Address>(last_pc_));
 
   // The two most common modes are given small tags, and usually fit in a byte.
-  if (rmode == RelocInfo::EMBEDDED_OBJECT) {
+  if (rmode == RelocInfo::FULL_EMBEDDED_OBJECT) {
     WriteShortTaggedPC(pc_delta, kEmbeddedObjectTag);
   } else if (rmode == RelocInfo::CODE_TARGET) {
     WriteShortTaggedPC(pc_delta, kCodeTargetTag);
@@ -233,7 +233,7 @@ void RelocIterator::next() {
     int tag = AdvanceGetTag();
     if (tag == kEmbeddedObjectTag) {
       ReadShortTaggedPC();
-      if (SetMode(RelocInfo::EMBEDDED_OBJECT)) return;
+      if (SetMode(RelocInfo::FULL_EMBEDDED_OBJECT)) return;
     } else if (tag == kCodeTargetTag) {
       ReadShortTaggedPC();
       if (SetMode(RelocInfo::CODE_TARGET)) return;
@@ -303,9 +303,9 @@ RelocIterator::RelocIterator(const CodeDesc& desc, int mode_mask)
 RelocIterator::RelocIterator(Vector<byte> instructions,
                              Vector<const byte> reloc_info, Address const_pool,
                              int mode_mask)
-    : RelocIterator(Code(), reinterpret_cast<Address>(instructions.start()),
-                    const_pool, reloc_info.start() + reloc_info.size(),
-                    reloc_info.start(), mode_mask) {}
+    : RelocIterator(Code(), reinterpret_cast<Address>(instructions.begin()),
+                    const_pool, reloc_info.begin() + reloc_info.size(),
+                    reloc_info.begin(), mode_mask) {}
 
 RelocIterator::RelocIterator(Code host, Address pc, Address constant_pool,
                              const byte* pos, const byte* end, int mode_mask)
@@ -377,13 +377,14 @@ bool RelocInfo::HasTargetAddressAddress() const {
   // non-intel platforms now that wasm code is no longer on the heap.
 #if defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_X64)
   static constexpr int kTargetAddressAddressModeMask =
-      ModeMask(CODE_TARGET) | ModeMask(EMBEDDED_OBJECT) |
-      ModeMask(EXTERNAL_REFERENCE) | ModeMask(OFF_HEAP_TARGET) |
-      ModeMask(RUNTIME_ENTRY) | ModeMask(WASM_CALL) | ModeMask(WASM_STUB_CALL);
+      ModeMask(CODE_TARGET) | ModeMask(FULL_EMBEDDED_OBJECT) |
+      ModeMask(COMPRESSED_EMBEDDED_OBJECT) | ModeMask(EXTERNAL_REFERENCE) |
+      ModeMask(OFF_HEAP_TARGET) | ModeMask(RUNTIME_ENTRY) |
+      ModeMask(WASM_CALL) | ModeMask(WASM_STUB_CALL);
 #else
   static constexpr int kTargetAddressAddressModeMask =
       ModeMask(CODE_TARGET) | ModeMask(RELATIVE_CODE_TARGET) |
-      ModeMask(EMBEDDED_OBJECT) | ModeMask(EXTERNAL_REFERENCE) |
+      ModeMask(FULL_EMBEDDED_OBJECT) | ModeMask(EXTERNAL_REFERENCE) |
       ModeMask(OFF_HEAP_TARGET) | ModeMask(RUNTIME_ENTRY) | ModeMask(WASM_CALL);
 #endif
   return (ModeMask(rmode_) & kTargetAddressAddressModeMask) != 0;
@@ -404,8 +405,10 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
   switch (rmode) {
     case NONE:
       return "no reloc";
-    case EMBEDDED_OBJECT:
-      return "embedded object";
+    case COMPRESSED_EMBEDDED_OBJECT:
+      return "compressed embedded object";
+    case FULL_EMBEDDED_OBJECT:
+      return "full embedded object";
     case CODE_TARGET:
       return "code target";
     case RELATIVE_CODE_TARGET:
@@ -450,8 +453,10 @@ void RelocInfo::Print(Isolate* isolate, std::ostream& os) {  // NOLINT
   } else if (rmode_ == DEOPT_REASON) {
     os << "  ("
        << DeoptimizeReasonToString(static_cast<DeoptimizeReason>(data_)) << ")";
-  } else if (rmode_ == EMBEDDED_OBJECT) {
+  } else if (rmode_ == FULL_EMBEDDED_OBJECT) {
     os << "  (" << Brief(target_object()) << ")";
+  } else if (rmode_ == COMPRESSED_EMBEDDED_OBJECT) {
+    os << "  (" << Brief(target_object()) << " compressed)";
   } else if (rmode_ == EXTERNAL_REFERENCE) {
     if (isolate) {
       ExternalReferenceEncoder ref_encoder(isolate);
@@ -488,7 +493,8 @@ void RelocInfo::Print(Isolate* isolate, std::ostream& os) {  // NOLINT
 #ifdef VERIFY_HEAP
 void RelocInfo::Verify(Isolate* isolate) {
   switch (rmode_) {
-    case EMBEDDED_OBJECT:
+    case COMPRESSED_EMBEDDED_OBJECT:
+    case FULL_EMBEDDED_OBJECT:
       Object::VerifyPointer(isolate, target_object());
       break;
     case CODE_TARGET:
@@ -533,7 +539,6 @@ void RelocInfo::Verify(Isolate* isolate) {
     case NUMBER_OF_MODES:
     case PC_JUMP:
       UNREACHABLE();
-      break;
   }
 }
 #endif  // VERIFY_HEAP

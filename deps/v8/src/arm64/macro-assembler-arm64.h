@@ -158,9 +158,7 @@ enum PreShiftImmMode {
 
 class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
  public:
-  template <typename... Args>
-  explicit TurboAssembler(Args&&... args)
-      : TurboAssemblerBase(std::forward<Args>(args)...) {}
+  using TurboAssemblerBase::TurboAssemblerBase;
 
 #if DEBUG
   void set_allow_macro_instructions(bool value) {
@@ -390,6 +388,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   V(fmla, Fmla)                  \
   V(fmls, Fmls)                  \
   V(fmulx, Fmulx)                \
+  V(fnmul, Fnmul)                \
   V(frecps, Frecps)              \
   V(frsqrts, Frsqrts)            \
   V(mla, Mla)                    \
@@ -648,10 +647,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // Load a literal from the inline constant pool.
   inline void Ldr(const CPURegister& rt, const Operand& imm);
 
-  // Claim or drop stack space without actually accessing memory.
+  // Claim or drop stack space.
   //
-  // In debug mode, both of these will write invalid data into the claimed or
-  // dropped space.
+  // On Windows, Claim will write a value every 4k, as is required by the stack
+  // expansion mechanism.
   //
   // The stack pointer must be aligned to 16 bytes and the size claimed or
   // dropped must be a multiple of 16 bytes.
@@ -742,12 +741,23 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void SaveRegisters(RegList registers);
   void RestoreRegisters(RegList registers);
 
-  void CallRecordWriteStub(Register object, Register address,
+  void CallRecordWriteStub(Register object, Operand offset,
                            RememberedSetAction remembered_set_action,
                            SaveFPRegsMode fp_mode);
-  void CallRecordWriteStub(Register object, Register address,
+  void CallRecordWriteStub(Register object, Operand offset,
                            RememberedSetAction remembered_set_action,
                            SaveFPRegsMode fp_mode, Address wasm_target);
+  void CallEphemeronKeyBarrier(Register object, Operand offset,
+                               SaveFPRegsMode fp_mode);
+
+  // For a given |object| and |offset|:
+  //   - Move |object| to |dst_object|.
+  //   - Compute the address of the slot pointed to by |offset| in |object| and
+  //     write it to |dst_slot|.
+  // This method makes sure |object| and |offset| are allowed to overlap with
+  // the destination registers.
+  void MoveObjectAndSlot(Register dst_object, Register dst_slot,
+                         Register object, Operand offset);
 
   // Alternative forms of Push and Pop, taking a RegList or CPURegList that
   // specifies the registers that are to be pushed or popped. Higher-numbered
@@ -783,11 +793,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   Operand MoveImmediateForShiftedOp(const Register& dst, int64_t imm,
                                     PreShiftImmMode mode);
 
-  void CheckPageFlagSet(const Register& object, const Register& scratch,
-                        int mask, Label* if_any_set);
-
-  void CheckPageFlagClear(const Register& object, const Register& scratch,
-                          int mask, Label* if_all_clear);
+  void CheckPageFlag(const Register& object, int mask, Condition cc,
+                     Label* condition_met);
 
   // Test the bits of register defined by bit_pattern, and branch if ANY of
   // those bits are set. May corrupt the status flags.
@@ -1199,10 +1206,15 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   void DecompressTaggedSigned(const Register& destination,
                               const MemOperand& field_operand);
+  void DecompressTaggedSigned(const Register& destination,
+                              const Register& source);
   void DecompressTaggedPointer(const Register& destination,
                                const MemOperand& field_operand);
+  void DecompressTaggedPointer(const Register& destination,
+                               const Register& source);
   void DecompressAnyTagged(const Register& destination,
                            const MemOperand& field_operand);
+  void DecompressAnyTagged(const Register& destination, const Register& source);
 
  protected:
   // The actual Push and Pop implementations. These don't generate any code
@@ -1271,7 +1283,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   void JumpHelper(int64_t offset, RelocInfo::Mode rmode, Condition cond = al);
 
-  void CallRecordWriteStub(Register object, Register address,
+  void CallRecordWriteStub(Register object, Operand offset,
                            RememberedSetAction remembered_set_action,
                            SaveFPRegsMode fp_mode, Handle<Code> code_target,
                            Address wasm_target);
@@ -1279,9 +1291,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
 class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
  public:
-  template <typename... Args>
-  explicit MacroAssembler(Args&&... args)
-      : TurboAssembler(std::forward<Args>(args)...) {}
+  using TurboAssembler::TurboAssembler;
 
   // Instruction set functions ------------------------------------------------
   // Logical macros.
@@ -1580,7 +1590,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   //
   // Unlike the other Push and Pop macros, PushPopQueue can handle mixed sets of
   // register sizes and types.
-  class PushPopQueue {
+  class V8_EXPORT_PRIVATE PushPopQueue {
    public:
     explicit PushPopQueue(MacroAssembler* masm) : masm_(masm), size_(0) {}
 
@@ -1607,13 +1617,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // higher address than 'dst1'. The offset is in bytes. The stack pointer must
   // be aligned to 16 bytes.
   void PeekPair(const CPURegister& dst1, const CPURegister& dst2, int offset);
-
-  // Variants of Claim and Drop, where the 'count' parameter is a SMI held in a
-  // register.
-  inline void ClaimBySMI(const Register& count_smi,
-                         uint64_t unit_size = kXRegSize);
-  inline void DropBySMI(const Register& count_smi,
-                        uint64_t unit_size = kXRegSize);
 
   // Compare a register with an operand, and branch to label depending on the
   // condition. May corrupt the status flags.
@@ -1927,25 +1930,21 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void PushSafepointRegisters();
   void PopSafepointRegisters();
 
-  void CheckPageFlag(const Register& object, const Register& scratch, int mask,
-                     Condition cc, Label* condition_met);
-
   // Notify the garbage collector that we wrote a pointer into an object.
   // |object| is the object being stored into, |value| is the object being
-  // stored.  value and scratch registers are clobbered by the operation.
+  // stored.
   // The offset is the offset from the start of the object, not the offset from
   // the tagged HeapObject pointer.  For use with FieldMemOperand(reg, off).
   void RecordWriteField(
-      Register object, int offset, Register value, Register scratch,
-      LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+      Register object, int offset, Register value, LinkRegisterStatus lr_status,
+      SaveFPRegsMode save_fp,
       RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
       SmiCheck smi_check = INLINE_SMI_CHECK);
 
-  // For a given |object| notify the garbage collector that the slot |address|
-  // has been written.  |value| is the object being stored. The value and
-  // address registers are clobbered by the operation.
+  // For a given |object| notify the garbage collector that the slot at |offset|
+  // has been written. |value| is the object being stored.
   void RecordWrite(
-      Register object, Register address, Register value,
+      Register object, Operand offset, Register value,
       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
       RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
       SmiCheck smi_check = INLINE_SMI_CHECK);
@@ -2083,7 +2082,7 @@ class InstructionAccurateScope {
 // original state, even if the lists were modified by some other means. Note
 // that this scope can be nested but the destructors need to run in the opposite
 // order as the constructors. We do not have assertions for this.
-class UseScratchRegisterScope {
+class V8_EXPORT_PRIVATE UseScratchRegisterScope {
  public:
   explicit UseScratchRegisterScope(TurboAssembler* tasm)
       : available_(tasm->TmpList()),
@@ -2111,7 +2110,8 @@ class UseScratchRegisterScope {
   VRegister AcquireSameSizeAs(const VRegister& reg);
 
  private:
-  static CPURegister AcquireNextAvailable(CPURegList* available);
+  static CPURegister AcquireNextAvailable(
+      CPURegList* available);
 
   // Available scratch registers.
   CPURegList* available_;     // kRegister

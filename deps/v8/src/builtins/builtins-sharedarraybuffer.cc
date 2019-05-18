@@ -8,11 +8,11 @@
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/code-factory.h"
-#include "src/conversions-inl.h"
 #include "src/counters.h"
 #include "src/futex-emulation.h"
 #include "src/globals.h"
 #include "src/heap/factory.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/objects-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 
@@ -74,8 +74,7 @@ V8_WARN_UNUSED_RESULT Maybe<size_t> ValidateAtomicAccess(
 
   size_t access_index;
   if (!TryNumberToSize(*access_index_obj, &access_index) ||
-      typed_array->WasDetached() ||
-      access_index >= typed_array->length_value()) {
+      typed_array->WasDetached() || access_index >= typed_array->length()) {
     isolate->Throw(*isolate->factory()->NewRangeError(
         MessageTemplate::kInvalidAtomicAccessIndex));
     return Nothing<size_t>();

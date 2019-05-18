@@ -26,7 +26,8 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 
-#include <stdlib.h>
+#include <cinttypes>
+#include <cstdlib>
 
 // The C++ style guide recommends using <re2> instead of <regex>. However, the
 // former isn't available in V8.
@@ -37,9 +38,9 @@
 #include "src/debug/debug.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
-#include "src/double.h"
 #include "src/frames-inl.h"
 #include "src/macro-assembler.h"
+#include "src/numbers/double.h"
 #include "src/objects-inl.h"
 #include "src/v8.h"
 #include "test/cctest/cctest.h"
@@ -63,7 +64,7 @@ bool DisassembleAndCompare(byte* begin, UseRegex use_regex,
   std::vector<std::string> disassembly;
   for (byte* pc = begin; pc < end;) {
     pc += disasm.InstructionDecode(buffer, pc);
-    disassembly.emplace_back(buffer.start());
+    disassembly.emplace_back(buffer.begin());
   }
 
   bool test_passed = true;
@@ -140,9 +141,9 @@ bool DisassembleAndCompare(byte* begin, UseRegex use_regex,
 
 // Verify that all invocations of the COMPARE macro passed successfully.
 // Exit with a failure if at least one of the tests failed.
-#define VERIFY_RUN() \
-if (failure) { \
-    V8_Fatal(__FILE__, __LINE__, "ARM Disassembler tests failed.\n"); \
+#define VERIFY_RUN()                           \
+  if (failure) {                               \
+    FATAL("ARM Disassembler tests failed.\n"); \
   }
 
 // clang-format off

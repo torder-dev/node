@@ -63,7 +63,7 @@ void RelocInfo::apply(intptr_t delta) {
     *p += delta;  // relocate entry
   } else if (RelocInfo::IsRelativeCodeTarget(rmode_)) {
     Instruction* branch = Instruction::At(pc_);
-    int32_t branch_offset = branch->GetBranchOffset() + delta;
+    int32_t branch_offset = branch->GetBranchOffset() - delta;
     branch->SetBranchOffset(branch_offset);
   }
 }
@@ -100,13 +100,17 @@ int RelocInfo::target_address_size() {
 }
 
 HeapObject RelocInfo::target_object() {
-  DCHECK(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
+  DCHECK(IsCodeTarget(rmode_) || rmode_ == FULL_EMBEDDED_OBJECT);
   return HeapObject::cast(
       Object(Assembler::target_address_at(pc_, constant_pool_)));
 }
 
+HeapObject RelocInfo::target_object_no_host(Isolate* isolate) {
+  return target_object();
+}
+
 Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
-  if (IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT) {
+  if (IsCodeTarget(rmode_) || rmode_ == FULL_EMBEDDED_OBJECT) {
     return Handle<HeapObject>(reinterpret_cast<Address*>(
         Assembler::target_address_at(pc_, constant_pool_)));
   }
@@ -117,7 +121,7 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
 void RelocInfo::set_target_object(Heap* heap, HeapObject target,
                                   WriteBarrierMode write_barrier_mode,
                                   ICacheFlushMode icache_flush_mode) {
-  DCHECK(IsCodeTarget(rmode_) || rmode_ == EMBEDDED_OBJECT);
+  DCHECK(IsCodeTarget(rmode_) || rmode_ == FULL_EMBEDDED_OBJECT);
   Assembler::set_target_address_at(pc_, constant_pool_, target->ptr(),
                                    icache_flush_mode);
   if (write_barrier_mode == UPDATE_WRITE_BARRIER && !host().is_null()) {
@@ -167,7 +171,7 @@ Address RelocInfo::target_off_heap_target() {
 }
 
 void RelocInfo::WipeOut() {
-  DCHECK(IsEmbeddedObject(rmode_) || IsCodeTarget(rmode_) ||
+  DCHECK(IsFullEmbeddedObject(rmode_) || IsCodeTarget(rmode_) ||
          IsRuntimeEntry(rmode_) || IsExternalReference(rmode_) ||
          IsInternalReference(rmode_) || IsOffHeapTarget(rmode_));
   if (IsInternalReference(rmode_)) {
@@ -182,10 +186,6 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
   Instruction* branch = Instruction::At(pc);
   int code_target_index = branch->GetBranchOffset() / kInstrSize;
   return GetCodeTarget(code_target_index);
-}
-
-Operand::Operand(int32_t immediate, RelocInfo::Mode rmode) : rmode_(rmode) {
-  value_.immediate = immediate;
 }
 
 Operand Operand::Zero() { return Operand(static_cast<int32_t>(0)); }
@@ -213,69 +213,6 @@ void Assembler::emit(Instr x) {
   CheckBuffer();
   *reinterpret_cast<Instr*>(pc_) = x;
   pc_ += kInstrSize;
-}
-
-
-Address Assembler::target_address_from_return_address(Address pc) {
-  // Returns the address of the call target from the return address that will
-  // be returned to after a call.
-  // Call sequence on V7 or later is:
-  //  movw  ip, #... @ call address low 16
-  //  movt  ip, #... @ call address high 16
-  //  blx   ip
-  //                      @ return address
-  // For V6 when the constant pool is unavailable, it is:
-  //  mov  ip, #...     @ call address low 8
-  //  orr  ip, ip, #... @ call address 2nd 8
-  //  orr  ip, ip, #... @ call address 3rd 8
-  //  orr  ip, ip, #... @ call address high 8
-  //  blx   ip
-  //                      @ return address
-  // In cases that need frequent patching, the address is in the
-  // constant pool.  It could be a small constant pool load:
-  //  ldr   ip, [pc, #...] @ call address
-  //  blx   ip
-  //                      @ return address
-  Address candidate = pc - 2 * kInstrSize;
-  Instr candidate_instr(Memory<int32_t>(candidate));
-  if (IsLdrPcImmediateOffset(candidate_instr)) {
-    return candidate;
-  } else {
-    if (CpuFeatures::IsSupported(ARMv7)) {
-      candidate -= 1 * kInstrSize;
-      DCHECK(IsMovW(Memory<int32_t>(candidate)) &&
-             IsMovT(Memory<int32_t>(candidate + kInstrSize)));
-    } else {
-      candidate -= 3 * kInstrSize;
-      DCHECK(IsMovImmed(Memory<int32_t>(candidate)) &&
-             IsOrrImmed(Memory<int32_t>(candidate + kInstrSize)) &&
-             IsOrrImmed(Memory<int32_t>(candidate + 2 * kInstrSize)) &&
-             IsOrrImmed(Memory<int32_t>(candidate + 3 * kInstrSize)));
-    }
-    return candidate;
-  }
-}
-
-
-Address Assembler::return_address_from_call_start(Address pc) {
-  if (IsLdrPcImmediateOffset(Memory<int32_t>(pc))) {
-    // Load from constant pool, small section.
-    return pc + kInstrSize * 2;
-  } else {
-    if (CpuFeatures::IsSupported(ARMv7)) {
-      DCHECK(IsMovW(Memory<int32_t>(pc)));
-      DCHECK(IsMovT(Memory<int32_t>(pc + kInstrSize)));
-      // A movw / movt load immediate.
-      return pc + kInstrSize * 3;
-    } else {
-      DCHECK(IsMovImmed(Memory<int32_t>(pc)));
-      DCHECK(IsOrrImmed(Memory<int32_t>(pc + kInstrSize)));
-      DCHECK(IsOrrImmed(Memory<int32_t>(pc + 2 * kInstrSize)));
-      DCHECK(IsOrrImmed(Memory<int32_t>(pc + 3 * kInstrSize)));
-      // A mov / orr load immediate.
-      return pc + kInstrSize * 5;
-    }
-  }
 }
 
 void Assembler::deserialization_set_special_target_at(

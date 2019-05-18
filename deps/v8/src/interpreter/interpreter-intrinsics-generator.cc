@@ -194,6 +194,13 @@ Node* IntrinsicsGenerator::IntrinsicAsBuiltinCall(
   return IntrinsicAsStubCall(args, context, callable);
 }
 
+Node* IntrinsicsGenerator::CopyDataProperties(
+    const InterpreterAssembler::RegListNodePair& args, Node* context) {
+  return IntrinsicAsStubCall(
+      args, context,
+      Builtins::CallableFor(isolate(), Builtins::kCopyDataProperties));
+}
+
 Node* IntrinsicsGenerator::CreateIterResultObject(
     const InterpreterAssembler::RegListNodePair& args, Node* context) {
   return IntrinsicAsStubCall(
@@ -207,7 +214,7 @@ Node* IntrinsicsGenerator::HasProperty(
       args, context, Builtins::CallableFor(isolate(), Builtins::kHasProperty));
 }
 
-Node* IntrinsicsGenerator::ToString(
+Node* IntrinsicsGenerator::ToStringRT(
     const InterpreterAssembler::RegListNodePair& args, Node* context) {
   return IntrinsicAsStubCall(
       args, context, Builtins::CallableFor(isolate(), Builtins::kToString));

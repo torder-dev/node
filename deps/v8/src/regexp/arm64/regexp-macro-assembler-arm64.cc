@@ -1068,8 +1068,9 @@ Handle<HeapObject> RegExpMacroAssemblerARM64::GetCode(Handle<String> source) {
 
   CodeDesc code_desc;
   masm_->GetCode(isolate(), &code_desc);
-  Handle<Code> code = isolate()->factory()->NewCode(code_desc, Code::REGEXP,
-                                                    masm_->CodeObject());
+  Handle<Code> code = Factory::CodeBuilder(isolate(), code_desc, Code::REGEXP)
+                          .set_self_reference(masm_->CodeObject())
+                          .Build();
   PROFILE(masm_->isolate(),
           RegExpCodeCreateEvent(AbstractCode::cast(*code), *source));
   return Handle<HeapObject>::cast(code);
@@ -1182,7 +1183,6 @@ void RegExpMacroAssemblerARM64::ReadCurrentPositionFromRegister(int reg) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
 }
 
@@ -1514,7 +1514,6 @@ Register RegExpMacroAssemblerARM64::GetRegister(int register_index,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   DCHECK(result.Is32Bits());
   return result;
@@ -1548,7 +1547,6 @@ void RegExpMacroAssemblerARM64::StoreRegister(int register_index,
     }
     default:
       UNREACHABLE();
-      break;
   }
 }
 

@@ -15,13 +15,13 @@
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/property-cell.h"
-#include "torque-generated/builtins-typed-array-createtypedarray-from-dsl-gen.h"
+#include "torque-generated/builtins-typed-array-createtypedarray-gen-tq.h"
 
 namespace v8 {
 namespace internal {
 
 using Node = compiler::Node;
-using IteratorRecord = IteratorBuiltinsFromDSLAssembler::IteratorRecord;
+using IteratorRecord = TorqueGeneratedIteratorBuiltinsAssembler::IteratorRecord;
 
 ArrayBuiltinsAssembler::ArrayBuiltinsAssembler(
     compiler::CodeAssemblerState* state)
@@ -31,78 +31,20 @@ ArrayBuiltinsAssembler::ArrayBuiltinsAssembler(
       to_(this, MachineRepresentation::kTagged, SmiConstant(0)),
       fully_spec_compliant_(this, {&k_, &a_, &to_}) {}
 
-void ArrayBuiltinsAssembler::FindResultGenerator() {
-  a_.Bind(UndefinedConstant());
-}
-
-Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
-  Node* value = CallJS(CodeFactory::Call(isolate()), context(), callbackfn(),
-                       this_arg(), k_value, k, o());
-  Label false_continue(this), return_true(this);
-  BranchIfToBooleanIsTrue(value, &return_true, &false_continue);
-  BIND(&return_true);
-  ReturnFromBuiltin(k_value);
-  BIND(&false_continue);
-  return a();
-  }
-
-  void ArrayBuiltinsAssembler::FindIndexResultGenerator() {
-    a_.Bind(SmiConstant(-1));
-  }
-
-  Node* ArrayBuiltinsAssembler::FindIndexProcessor(Node* k_value, Node* k) {
-    Node* value = CallJS(CodeFactory::Call(isolate()), context(), callbackfn(),
-                         this_arg(), k_value, k, o());
-    Label false_continue(this), return_true(this);
-    BranchIfToBooleanIsTrue(value, &return_true, &false_continue);
-    BIND(&return_true);
-    ReturnFromBuiltin(k);
-    BIND(&false_continue);
-    return a();
-  }
-
-  void ArrayBuiltinsAssembler::SomeResultGenerator() {
-    a_.Bind(FalseConstant());
-  }
-
-  Node* ArrayBuiltinsAssembler::SomeProcessor(Node* k_value, Node* k) {
-    Node* value = CallJS(CodeFactory::Call(isolate()), context(), callbackfn(),
-                         this_arg(), k_value, k, o());
-    Label false_continue(this), return_true(this);
-    BranchIfToBooleanIsTrue(value, &return_true, &false_continue);
-    BIND(&return_true);
-    ReturnFromBuiltin(TrueConstant());
-    BIND(&false_continue);
-    return a();
-  }
-
-  void ArrayBuiltinsAssembler::EveryResultGenerator() {
-    a_.Bind(TrueConstant());
-  }
-
-  Node* ArrayBuiltinsAssembler::EveryProcessor(Node* k_value, Node* k) {
-    Node* value = CallJS(CodeFactory::Call(isolate()), context(), callbackfn(),
-                         this_arg(), k_value, k, o());
-    Label true_continue(this), return_false(this);
-    BranchIfToBooleanIsTrue(value, &true_continue, &return_false);
-    BIND(&return_false);
-    ReturnFromBuiltin(FalseConstant());
-    BIND(&true_continue);
-    return a();
-  }
-
   void ArrayBuiltinsAssembler::TypedArrayMapResultGenerator() {
     // 6. Let A be ? TypedArraySpeciesCreate(O, len).
     TNode<JSTypedArray> original_array = CAST(o());
     TNode<Smi> length = CAST(len_);
     const char* method_name = "%TypedArray%.prototype.map";
 
-    TypedArrayCreatetypedarrayBuiltinsFromDSLAssembler typedarray_asm(state());
+    TorqueGeneratedTypedArrayCreatetypedarrayBuiltinsAssembler typedarray_asm(
+        state());
     TNode<JSTypedArray> a = typedarray_asm.TypedArraySpeciesCreateByLength(
         context(), method_name, original_array, length);
     // In the Spec and our current implementation, the length check is already
     // performed in TypedArraySpeciesCreate.
-    CSA_ASSERT(this, SmiLessThanOrEqual(CAST(len_), LoadJSTypedArrayLength(a)));
+    CSA_ASSERT(this, UintPtrLessThanOrEqual(SmiUntag(CAST(len_)),
+                                            LoadJSTypedArrayLength(a)));
     fast_typed_array_target_ =
         Word32Equal(LoadInstanceType(LoadElements(original_array)),
                     LoadInstanceType(LoadElements(a)));
@@ -172,9 +114,10 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
     TNode<ExternalReference> memset =
         ExternalConstant(ExternalReference::libc_memset_function());
     STATIC_ASSERT(kSizetSize == kIntptrSize);
-    CallCFunction3(MachineType::Pointer(), MachineType::Pointer(),
-                   MachineType::IntPtr(), MachineType::UintPtr(), memset,
-                   backing_store, IntPtrConstant(0), byte_length);
+    CallCFunction(memset, MachineType::Pointer(),
+                  std::make_pair(MachineType::Pointer(), backing_store),
+                  std::make_pair(MachineType::IntPtr(), IntPtrConstant(0)),
+                  std::make_pair(MachineType::UintPtr(), byte_length));
   }
 
   void ArrayBuiltinsAssembler::ReturnFromBuiltin(Node* value) {
@@ -218,7 +161,7 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
         LoadJSArrayBufferViewBuffer(typed_array);
     ThrowIfArrayBufferIsDetached(context_, array_buffer, name_);
 
-    len_ = LoadJSTypedArrayLength(typed_array);
+    len_ = ChangeUintPtrToTagged(LoadJSTypedArrayLength(typed_array));
 
     Label throw_not_callable(this, Label::kDeferred);
     Label distinguish_types(this);
@@ -592,139 +535,6 @@ TF_BUILTIN(ArrayPrototypePush, CodeStubAssembler) {
   }
 }
 
-TF_BUILTIN(ArrayPrototypeShift, CodeStubAssembler) {
-  TNode<Int32T> argc =
-      UncheckedCast<Int32T>(Parameter(Descriptor::kJSActualArgumentsCount));
-  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
-  CSA_ASSERT(this, IsUndefined(Parameter(Descriptor::kJSNewTarget)));
-
-  CodeStubArguments args(this, ChangeInt32ToIntPtr(argc));
-  TNode<Object> receiver = args.GetReceiver();
-
-  Label runtime(this, Label::kDeferred);
-  Label fast(this);
-
-  // Only shift in this stub if
-  // 1) the array has fast elements
-  // 2) the length is writable,
-  // 3) the elements backing store isn't copy-on-write,
-  // 4) we aren't supposed to shrink the backing store,
-  // 5) we aren't supposed to left-trim the backing store.
-
-  // 1) Check that the array has fast elements.
-  BranchIfFastJSArray(receiver, context, &fast, &runtime);
-
-  BIND(&fast);
-  {
-    TNode<JSArray> array_receiver = CAST(receiver);
-    CSA_ASSERT(this, TaggedIsPositiveSmi(LoadJSArrayLength(array_receiver)));
-
-    // 2) Ensure that the length is writable.
-    //    This check needs to happen before the check for length zero.
-    //    The spec requires a "SetProperty(array, 'length', 0)" call when
-    //    the length is zero. This must throw an exception in the case of a
-    //    read-only length.
-    EnsureArrayLengthWritable(LoadMap(array_receiver), &runtime);
-
-    TNode<IntPtrT> length =
-        LoadAndUntagObjectField(array_receiver, JSArray::kLengthOffset);
-    Label return_undefined(this), fast_elements_tagged(this),
-        fast_elements_smi(this);
-    GotoIf(IntPtrEqual(length, IntPtrConstant(0)), &return_undefined);
-
-    // 3) Check that the elements backing store isn't copy-on-write.
-    TNode<FixedArrayBase> elements = LoadElements(array_receiver);
-    GotoIf(WordEqual(LoadMap(elements), LoadRoot(RootIndex::kFixedCOWArrayMap)),
-           &runtime);
-
-    TNode<IntPtrT> new_length = IntPtrSub(length, IntPtrConstant(1));
-
-    // 4) Check that we're not supposed to right-trim the backing store, as
-    //    implemented in elements.cc:ElementsAccessorBase::SetLengthImpl.
-    Node* capacity = SmiUntag(LoadFixedArrayBaseLength(elements));
-    GotoIf(IntPtrLessThan(
-               IntPtrAdd(IntPtrAdd(new_length, new_length),
-                         IntPtrConstant(JSObject::kMinAddedElementsCapacity)),
-               capacity),
-           &runtime);
-
-    // 5) Check that we're not supposed to left-trim the backing store, as
-    //    implemented in elements.cc:FastElementsAccessor::MoveElements.
-    GotoIf(IntPtrGreaterThan(new_length,
-                             IntPtrConstant(JSArray::kMaxCopyElements)),
-           &runtime);
-
-    StoreObjectFieldNoWriteBarrier(array_receiver, JSArray::kLengthOffset,
-                                   SmiTag(new_length));
-
-    TNode<IntPtrT> element_zero = IntPtrConstant(0);
-    TNode<IntPtrT> element_one = IntPtrConstant(1);
-    TNode<Int32T> elements_kind = LoadElementsKind(array_receiver);
-    GotoIf(
-        Int32LessThanOrEqual(elements_kind, Int32Constant(HOLEY_SMI_ELEMENTS)),
-        &fast_elements_smi);
-    GotoIf(Int32LessThanOrEqual(elements_kind, Int32Constant(HOLEY_ELEMENTS)),
-           &fast_elements_tagged);
-
-    // Fast double elements kind:
-    {
-      CSA_ASSERT(this,
-                 Int32LessThanOrEqual(elements_kind,
-                                      Int32Constant(HOLEY_DOUBLE_ELEMENTS)));
-
-      VARIABLE(result, MachineRepresentation::kTagged, UndefinedConstant());
-
-      Label move_elements(this);
-      result.Bind(AllocateHeapNumberWithValue(LoadFixedDoubleArrayElement(
-          CAST(elements), element_zero, &move_elements)));
-      Goto(&move_elements);
-      BIND(&move_elements);
-
-      MoveElements(HOLEY_DOUBLE_ELEMENTS, elements, element_zero, element_one,
-                   new_length);
-      StoreFixedDoubleArrayHole(CAST(elements), new_length);
-      args.PopAndReturn(result.value());
-    }
-
-    BIND(&fast_elements_tagged);
-    {
-      TNode<FixedArray> elements_fixed_array = CAST(elements);
-      Node* value = LoadFixedArrayElement(elements_fixed_array, 0);
-      MoveElements(HOLEY_ELEMENTS, elements, element_zero, element_one,
-                   new_length);
-      StoreFixedArrayElement(elements_fixed_array, new_length,
-                             TheHoleConstant());
-      GotoIf(WordEqual(value, TheHoleConstant()), &return_undefined);
-      args.PopAndReturn(value);
-    }
-
-    BIND(&fast_elements_smi);
-    {
-      TNode<FixedArray> elements_fixed_array = CAST(elements);
-      Node* value = LoadFixedArrayElement(elements_fixed_array, 0);
-      MoveElements(HOLEY_SMI_ELEMENTS, elements, element_zero, element_one,
-                   new_length);
-      StoreFixedArrayElement(elements_fixed_array, new_length,
-                             TheHoleConstant());
-      GotoIf(WordEqual(value, TheHoleConstant()), &return_undefined);
-      args.PopAndReturn(value);
-    }
-
-    BIND(&return_undefined);
-    { args.PopAndReturn(UndefinedConstant()); }
-  }
-
-  BIND(&runtime);
-  {
-    // We are not using Parameter(Descriptor::kJSTarget) and loading the value
-    // from the current frame here in order to reduce register pressure on the
-    // fast path.
-    TNode<JSFunction> target = LoadTargetFromFrame();
-    TailCallBuiltin(Builtins::kArrayShift, context, target, UndefinedConstant(),
-                    argc);
-  }
-}
-
 TF_BUILTIN(ExtractFastJSArray, ArrayBuiltinsAssembler) {
   ParameterMode mode = OptimalParameterMode();
   TNode<Context> context = CAST(Parameter(Descriptor::kContext));
@@ -1047,81 +857,6 @@ TF_BUILTIN(ArrayFrom, ArrayPopulatorAssembler) {
   args.PopAndReturn(array.value());
 }
 
-// ES #sec-get-%typedarray%.prototype.find
-TF_BUILTIN(TypedArrayPrototypeFind, ArrayBuiltinsAssembler) {
-  TNode<IntPtrT> argc =
-      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
-  CodeStubArguments args(this, argc);
-  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
-  TNode<Object> receiver = args.GetReceiver();
-  Node* callbackfn = args.GetOptionalArgumentValue(0);
-  Node* this_arg = args.GetOptionalArgumentValue(1);
-
-  InitIteratingArrayBuiltinBody(context, receiver, callbackfn, this_arg, argc);
-
-  GenerateIteratingTypedArrayBuiltinBody(
-      "%TypedArray%.prototype.find",
-      &ArrayBuiltinsAssembler::FindResultGenerator,
-      &ArrayBuiltinsAssembler::FindProcessor,
-      &ArrayBuiltinsAssembler::NullPostLoopAction);
-}
-
-// ES #sec-get-%typedarray%.prototype.findIndex
-TF_BUILTIN(TypedArrayPrototypeFindIndex, ArrayBuiltinsAssembler) {
-  TNode<IntPtrT> argc =
-      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
-  CodeStubArguments args(this, argc);
-  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
-  TNode<Object> receiver = args.GetReceiver();
-  Node* callbackfn = args.GetOptionalArgumentValue(0);
-  Node* this_arg = args.GetOptionalArgumentValue(1);
-
-  InitIteratingArrayBuiltinBody(context, receiver, callbackfn, this_arg, argc);
-
-  GenerateIteratingTypedArrayBuiltinBody(
-      "%TypedArray%.prototype.findIndex",
-      &ArrayBuiltinsAssembler::FindIndexResultGenerator,
-      &ArrayBuiltinsAssembler::FindIndexProcessor,
-      &ArrayBuiltinsAssembler::NullPostLoopAction);
-}
-
-
-TF_BUILTIN(TypedArrayPrototypeSome, ArrayBuiltinsAssembler) {
-  TNode<IntPtrT> argc =
-      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
-  CodeStubArguments args(this, argc);
-  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
-  TNode<Object> receiver = args.GetReceiver();
-  Node* callbackfn = args.GetOptionalArgumentValue(0);
-  Node* this_arg = args.GetOptionalArgumentValue(1);
-
-  InitIteratingArrayBuiltinBody(context, receiver, callbackfn, this_arg, argc);
-
-  GenerateIteratingTypedArrayBuiltinBody(
-      "%TypedArray%.prototype.some",
-      &ArrayBuiltinsAssembler::SomeResultGenerator,
-      &ArrayBuiltinsAssembler::SomeProcessor,
-      &ArrayBuiltinsAssembler::NullPostLoopAction);
-}
-
-TF_BUILTIN(TypedArrayPrototypeEvery, ArrayBuiltinsAssembler) {
-  TNode<IntPtrT> argc =
-      ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
-  CodeStubArguments args(this, argc);
-  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
-  TNode<Object> receiver = args.GetReceiver();
-  Node* callbackfn = args.GetOptionalArgumentValue(0);
-  Node* this_arg = args.GetOptionalArgumentValue(1);
-
-  InitIteratingArrayBuiltinBody(context, receiver, callbackfn, this_arg, argc);
-
-  GenerateIteratingTypedArrayBuiltinBody(
-      "%TypedArray%.prototype.every",
-      &ArrayBuiltinsAssembler::EveryResultGenerator,
-      &ArrayBuiltinsAssembler::EveryProcessor,
-      &ArrayBuiltinsAssembler::NullPostLoopAction);
-}
-
 TF_BUILTIN(TypedArrayPrototypeMap, ArrayBuiltinsAssembler) {
   TNode<IntPtrT> argc =
       ChangeInt32ToIntPtr(Parameter(Descriptor::kJSActualArgumentsCount));
@@ -1203,7 +938,7 @@ void ArrayIncludesIndexofAssembler::Generate(SearchVariant variant,
 
   // Take slow path if not a JSArray, if retrieving elements requires
   // traversing prototype, or if access checks are required.
-  BranchIfFastJSArray(receiver, context, &init_index, &call_runtime);
+  BranchIfFastJSArrayForRead(receiver, context, &init_index, &call_runtime);
 
   BIND(&init_index);
   VARIABLE(index_var, MachineType::PointerRepresentation(), intptr_zero);
@@ -1261,12 +996,16 @@ void ArrayIncludesIndexofAssembler::Generate(SearchVariant variant,
   STATIC_ASSERT(HOLEY_SMI_ELEMENTS == 1);
   STATIC_ASSERT(PACKED_ELEMENTS == 2);
   STATIC_ASSERT(HOLEY_ELEMENTS == 3);
-  GotoIf(Uint32LessThanOrEqual(elements_kind, Int32Constant(HOLEY_ELEMENTS)),
+  GotoIf(IsElementsKindLessThanOrEqual(elements_kind, HOLEY_ELEMENTS),
          &if_smiorobjects);
-  GotoIf(Word32Equal(elements_kind, Int32Constant(PACKED_DOUBLE_ELEMENTS)),
-         &if_packed_doubles);
-  GotoIf(Word32Equal(elements_kind, Int32Constant(HOLEY_DOUBLE_ELEMENTS)),
+  GotoIf(
+      ElementsKindEqual(elements_kind, Int32Constant(PACKED_DOUBLE_ELEMENTS)),
+      &if_packed_doubles);
+  GotoIf(ElementsKindEqual(elements_kind, Int32Constant(HOLEY_DOUBLE_ELEMENTS)),
          &if_holey_doubles);
+  GotoIf(
+      IsElementsKindLessThanOrEqual(elements_kind, LAST_FROZEN_ELEMENTS_KIND),
+      &if_smiorobjects);
   Goto(&return_not_found);
 
   BIND(&if_smiorobjects);
@@ -1904,6 +1643,7 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
   BIND(&if_typedarray);
   {
     // If {array} is a JSTypedArray, the {index} must always be a Smi.
+    // TODO(v8:4153): Update this and the relevant TurboFan code.
     CSA_ASSERT(this, TaggedIsSmi(index));
 
     // Check that the {array}s buffer wasn't detached.
@@ -1913,8 +1653,9 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
     // [[ArrayIteratorNextIndex]] anymore, since a JSTypedArray's
     // length cannot change anymore, so this {iterator} will never
     // produce values again anyways.
-    TNode<Smi> length = LoadJSTypedArrayLength(CAST(array));
-    GotoIfNot(SmiBelow(CAST(index), length), &allocate_iterator_result);
+    TNode<UintPtrT> length = LoadJSTypedArrayLength(CAST(array));
+    GotoIfNot(UintPtrLessThan(SmiUntag(CAST(index)), length),
+              &allocate_iterator_result);
     StoreObjectFieldNoWriteBarrier(iterator, JSArrayIterator::kNextIndexOffset,
                                    SmiInc(CAST(index)));
 

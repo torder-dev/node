@@ -6,6 +6,7 @@
 
 #include "src/assembler-inl.h"
 #include "src/heap/heap-inl.h"  // For Space::identity().
+#include "src/heap/read-only-heap.h"
 #include "src/interpreter/interpreter.h"
 #include "src/objects/code.h"
 #include "src/objects/js-array-buffer-inl.h"
@@ -71,14 +72,13 @@ void Serializer::OutputStatistics(const char* name) {
 
 #ifdef OBJECT_PRINT
   PrintF("  Instance types (count and bytes):\n");
-#define PRINT_INSTANCE_TYPE(Name)                                              \
-  for (int space = 0; space < LAST_SPACE; ++space) {                           \
-    if (instance_type_count_[space][Name]) {                                   \
-      PrintF("%10d %10" PRIuS "  %-10s %s\n",                                  \
-             instance_type_count_[space][Name],                                \
-             instance_type_size_[space][Name],                                 \
-             AllocationSpaceName(static_cast<AllocationSpace>(space)), #Name); \
-    }                                                                          \
+#define PRINT_INSTANCE_TYPE(Name)                                             \
+  for (int space = 0; space < LAST_SPACE; ++space) {                          \
+    if (instance_type_count_[space][Name]) {                                  \
+      PrintF("%10d %10zu  %-10s %s\n", instance_type_count_[space][Name],     \
+             instance_type_size_[space][Name],                                \
+             Heap::GetSpaceName(static_cast<AllocationSpace>(space)), #Name); \
+    }                                                                         \
   }
   INSTANCE_TYPE_LIST(PRINT_INSTANCE_TYPE)
 #undef PRINT_INSTANCE_TYPE
@@ -144,7 +144,6 @@ bool Serializer::SerializeHotObject(HeapObject obj) {
     obj->ShortPrint();
     PrintF("\n");
   }
-  // TODO(ishell): remove kHotObjectWithSkip
   sink_.Put(kHotObject + index, "HotObject");
   return true;
 }
@@ -391,7 +390,7 @@ void Serializer::ObjectSerializer::SerializeJSTypedArray() {
     // detached TypedArrays and clears the values in the FixedTypedArray so that
     // we don't try to serialize the now invalid backing store.
     elements->set_external_pointer(reinterpret_cast<void*>(Smi::kZero.ptr()));
-    elements->set_length(0);
+    elements->set_number_of_elements_onheap_only(0);
   }
   SerializeObject();
 }
@@ -540,7 +539,7 @@ void Serializer::ObjectSerializer::Serialize() {
   if (object_->IsExternalString()) {
     SerializeExternalString();
     return;
-  } else if (!serializer_->isolate()->heap()->InReadOnlySpace(object_)) {
+  } else if (!ReadOnlyHeap::Contains(object_)) {
     // Only clear padding for strings outside RO_SPACE. RO_SPACE should have
     // been cleared elsewhere.
     if (object_->IsSeqOneByteString()) {
@@ -856,7 +855,8 @@ void Serializer::ObjectSerializer::OutputCode(int size) {
   // and wipe all pointers in the copy, which we then serialize.
   Code off_heap_code = serializer_->CopyCode(on_heap_code);
   int mode_mask = RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
-                  RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
+                  RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
+                  RelocInfo::ModeMask(RelocInfo::COMPRESSED_EMBEDDED_OBJECT) |
                   RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
                   RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
                   RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |

@@ -25,6 +25,7 @@ struct JSOps {
   const byte* relocation_end() const { return code->relocation_end(); }
   int relocation_size() const { return code->relocation_size(); }
   Address code_comments() const { return code->code_comments(); }
+  int code_comments_size() const { return code->code_comments_size(); }
 };
 
 struct WasmOps {
@@ -32,19 +33,20 @@ struct WasmOps {
 
   Address constant_pool() const { return code->constant_pool(); }
   Address instruction_start() const {
-    return reinterpret_cast<Address>(code->instructions().start());
+    return reinterpret_cast<Address>(code->instructions().begin());
   }
   Address instruction_end() const {
-    return reinterpret_cast<Address>(code->instructions().start() +
+    return reinterpret_cast<Address>(code->instructions().begin() +
                                      code->instructions().size());
   }
   int instruction_size() const { return code->instructions().length(); }
-  const byte* relocation_start() const { return code->reloc_info().start(); }
+  const byte* relocation_start() const { return code->reloc_info().begin(); }
   const byte* relocation_end() const {
-    return code->reloc_info().start() + code->reloc_info().length();
+    return code->reloc_info().begin() + code->reloc_info().length();
   }
   int relocation_size() const { return code->reloc_info().length(); }
   Address code_comments() const { return code->code_comments(); }
+  int code_comments_size() const { return code->code_comments_size(); }
 };
 
 struct CodeDescOps {
@@ -70,6 +72,7 @@ struct CodeDescOps {
   Address code_comments() const {
     return instruction_start() + code_desc->code_comments_offset;
   }
+  int code_comments_size() const { return code_desc->code_comments_size; }
 };
 }  // namespace
 
@@ -96,6 +99,7 @@ DISPATCH(const byte*, relocation_start)
 DISPATCH(const byte*, relocation_end)
 DISPATCH(int, relocation_size)
 DISPATCH(Address, code_comments)
+DISPATCH(int, code_comments_size)
 
 #undef DISPATCH
 

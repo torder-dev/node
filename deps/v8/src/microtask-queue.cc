@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <algorithm>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/base/logging.h"
 #include "src/handles-inl.h"
 #include "src/isolate.h"
@@ -209,6 +209,10 @@ void MicrotaskQueue::IterateMicrotasks(RootVisitor* visitor) {
   if (new_capacity < capacity_) {
     ResizeBuffer(new_capacity);
   }
+}
+
+int MicrotaskQueue::GetMicrotasksScopeDepth() const {
+  return microtasks_depth_;
 }
 
 void MicrotaskQueue::AddMicrotasksCompletedCallback(

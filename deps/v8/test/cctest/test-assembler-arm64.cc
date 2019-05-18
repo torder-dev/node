@@ -215,8 +215,8 @@ static void InitializeVM() {
 #define CHECK_EQUAL_NZCV(expected)                                            \
   CHECK(EqualNzcv(expected, core.flags_nzcv()))
 
-#define CHECK_EQUAL_REGISTERS(expected)                                       \
-  CHECK(EqualRegisters(&expected, &core))
+#define CHECK_EQUAL_REGISTERS(expected) \
+  CHECK(EqualV8Registers(&expected, &core))
 
 #define CHECK_EQUAL_32(expected, result)                                      \
   CHECK(Equal32(static_cast<uint32_t>(expected), &core, result))
@@ -6448,7 +6448,7 @@ namespace {
 void LoadLiteral(MacroAssembler* masm, Register reg, uint64_t imm) {
   // Since we do not allow non-relocatable entries in the literal pool, we need
   // to fake a relocation mode that is not NONE here.
-  masm->Ldr(reg, Immediate(imm, RelocInfo::EMBEDDED_OBJECT));
+  masm->Ldr(reg, Immediate(imm, RelocInfo::FULL_EMBEDDED_OBJECT));
 }
 
 }  // namespace
@@ -6984,10 +6984,6 @@ TEST(claim_drop_zero) {
   __ Drop(xzr, 0);
   __ Claim(x7, 0);
   __ Drop(x7, 0);
-  __ ClaimBySMI(xzr, 8);
-  __ DropBySMI(xzr, 8);
-  __ ClaimBySMI(xzr, 0);
-  __ DropBySMI(xzr, 0);
   CHECK_EQ(0u, __ SizeOfCodeGeneratedSince(&start));
 
   END();
@@ -14722,8 +14718,9 @@ TEST(pool_size) {
   HandleScope handle_scope(isolate);
   CodeDesc desc;
   masm.GetCode(isolate, &desc);
-  Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, masm.CodeObject());
+  Handle<Code> code = Factory::CodeBuilder(isolate, desc, Code::STUB)
+                          .set_self_reference(masm.CodeObject())
+                          .Build();
 
   unsigned pool_count = 0;
   int pool_mask = RelocInfo::ModeMask(RelocInfo::CONST_POOL) |

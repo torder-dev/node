@@ -40,21 +40,15 @@ class JSCollator : public JSObject {
   static Handle<JSObject> ResolvedOptions(Isolate* isolate,
                                           Handle<JSCollator> collator);
 
-  static const std::set<std::string>& GetAvailableLocales();
+  V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
   DECL_CAST(JSCollator)
   DECL_PRINTER(JSCollator)
   DECL_VERIFIER(JSCollator)
 
 // Layout description.
-#define JS_COLLATOR_FIELDS(V)         \
-  V(kICUCollatorOffset, kTaggedSize)  \
-  V(kBoundCompareOffset, kTaggedSize) \
-  /* Total size. */                   \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_COLLATOR_FIELDS)
-#undef JS_COLLATOR_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                TORQUE_GENERATED_JSCOLLATOR_FIELDS)
 
   DECL_ACCESSORS(icu_collator, Managed<icu::Collator>)
   DECL_ACCESSORS(bound_compare, Object)

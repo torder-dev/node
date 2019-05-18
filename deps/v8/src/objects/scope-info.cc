@@ -8,7 +8,7 @@
 
 #include "src/ast/scopes.h"
 #include "src/ast/variables.h"
-#include "src/bootstrapper.h"
+#include "src/init/bootstrapper.h"
 
 #include "src/objects-inl.h"
 #include "src/objects/module-inl.h"
@@ -134,6 +134,9 @@ Handle<ScopeInfo> ScopeInfo::Create(Isolate* isolate, Zone* zone, Scope* scope,
     function_name_info = NONE;
   }
 
+  const bool has_brand = scope->is_class_scope()
+                             ? scope->AsClassScope()->brand() != nullptr
+                             : false;
   const bool has_function_name = function_name_info != NONE;
   const bool has_position_info = NeedsPositionInfo(scope->scope_type());
   const bool has_receiver = receiver_info == STACK || receiver_info == CONTEXT;
@@ -181,6 +184,7 @@ Handle<ScopeInfo> ScopeInfo::Create(Isolate* isolate, Zone* zone, Scope* scope,
         LanguageModeField::encode(scope->language_mode()) |
         DeclarationScopeField::encode(scope->is_declaration_scope()) |
         ReceiverVariableField::encode(receiver_info) |
+        HasClassBrandField::encode(has_brand) |
         HasNewTargetField::encode(has_new_target) |
         FunctionVariableField::encode(function_name_info) |
         HasInferredFunctionNameField::encode(has_inferred_function_name) |
@@ -354,9 +358,9 @@ Handle<ScopeInfo> ScopeInfo::CreateForWithScope(
       ScopeTypeField::encode(WITH_SCOPE) | CallsSloppyEvalField::encode(false) |
       LanguageModeField::encode(LanguageMode::kSloppy) |
       DeclarationScopeField::encode(false) |
-      ReceiverVariableField::encode(NONE) | HasNewTargetField::encode(false) |
-      FunctionVariableField::encode(NONE) | IsAsmModuleField::encode(false) |
-      HasSimpleParametersField::encode(true) |
+      ReceiverVariableField::encode(NONE) | HasClassBrandField::encode(false) |
+      HasNewTargetField::encode(false) | FunctionVariableField::encode(NONE) |
+      IsAsmModuleField::encode(false) | HasSimpleParametersField::encode(true) |
       FunctionKindField::encode(kNormalFunction) |
       HasOuterScopeInfoField::encode(has_outer_scope_info) |
       IsDebugEvaluateScopeField::encode(false);
@@ -416,7 +420,7 @@ Handle<ScopeInfo> ScopeInfo::CreateForBootstrapping(Isolate* isolate,
       LanguageModeField::encode(LanguageMode::kSloppy) |
       DeclarationScopeField::encode(true) |
       ReceiverVariableField::encode(is_empty_function ? UNUSED : CONTEXT) |
-      HasNewTargetField::encode(false) |
+      HasClassBrandField::encode(false) | HasNewTargetField::encode(false) |
       FunctionVariableField::encode(is_empty_function ? UNUSED : NONE) |
       HasInferredFunctionNameField::encode(has_inferred_function_name) |
       IsAsmModuleField::encode(false) | HasSimpleParametersField::encode(true) |
@@ -508,14 +512,14 @@ int ScopeInfo::ContextLength() const {
     bool function_name_context_slot =
         FunctionVariableField::decode(Flags()) == CONTEXT;
     bool force_context = ForceContextAllocationField::decode(Flags());
-    bool has_context = context_locals > 0 || force_context ||
-                       function_name_context_slot ||
-                       scope_type() == WITH_SCOPE ||
-                       (scope_type() == BLOCK_SCOPE && CallsSloppyEval() &&
-                        is_declaration_scope()) ||
-                       (scope_type() == FUNCTION_SCOPE && CallsSloppyEval()) ||
-                       (scope_type() == FUNCTION_SCOPE && IsAsmModule()) ||
-                       scope_type() == MODULE_SCOPE;
+    bool has_context =
+        context_locals > 0 || force_context || function_name_context_slot ||
+        scope_type() == WITH_SCOPE || scope_type() == CLASS_SCOPE ||
+        (scope_type() == BLOCK_SCOPE && CallsSloppyEval() &&
+         is_declaration_scope()) ||
+        (scope_type() == FUNCTION_SCOPE && CallsSloppyEval()) ||
+        (scope_type() == FUNCTION_SCOPE && IsAsmModule()) ||
+        scope_type() == MODULE_SCOPE;
 
     if (has_context) {
       return Context::MIN_CONTEXT_SLOTS + context_locals +
@@ -534,6 +538,10 @@ bool ScopeInfo::HasAllocatedReceiver() const {
   if (length() == 0) return false;
   VariableAllocationInfo allocation = ReceiverVariableField::decode(Flags());
   return allocation == STACK || allocation == CONTEXT;
+}
+
+bool ScopeInfo::HasClassBrand() const {
+  return HasClassBrandField::decode(Flags());
 }
 
 bool ScopeInfo::HasNewTarget() const {
@@ -871,8 +879,9 @@ Handle<ModuleInfoEntry> ModuleInfoEntry::New(Isolate* isolate,
                                              Handle<Object> import_name,
                                              int module_request, int cell_index,
                                              int beg_pos, int end_pos) {
-  Handle<ModuleInfoEntry> result = Handle<ModuleInfoEntry>::cast(
-      isolate->factory()->NewStruct(MODULE_INFO_ENTRY_TYPE, TENURED));
+  Handle<ModuleInfoEntry> result =
+      Handle<ModuleInfoEntry>::cast(isolate->factory()->NewStruct(
+          MODULE_INFO_ENTRY_TYPE, AllocationType::kOld));
   result->set_export_name(*export_name);
   result->set_local_name(*local_name);
   result->set_import_name(*import_name);

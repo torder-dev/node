@@ -97,15 +97,15 @@ void Malloced::Delete(void* p) {
 }
 
 char* StrDup(const char* str) {
-  int length = StrLength(str);
+  size_t length = strlen(str);
   char* result = NewArray<char>(length + 1);
   MemCopy(result, str, length);
   result[length] = '\0';
   return result;
 }
 
-char* StrNDup(const char* str, int n) {
-  int length = StrLength(str);
+char* StrNDup(const char* str, size_t n) {
+  size_t length = strlen(str);
   if (n < length) length = n;
   char* result = NewArray<char>(length + 1);
   MemCopy(result, str, length);
@@ -281,13 +281,6 @@ void VirtualMemory::Free() {
   // ReleasePages may leave size at only commit granularity. Align it here.
   CHECK(FreePages(page_allocator, reinterpret_cast<void*>(region.begin()),
                   RoundUp(region.size(), page_allocator->AllocatePageSize())));
-}
-
-void VirtualMemory::TakeControl(VirtualMemory* from) {
-  DCHECK(!IsReserved());
-  page_allocator_ = from->page_allocator_;
-  region_ = from->region_;
-  from->Reset();
 }
 
 }  // namespace internal

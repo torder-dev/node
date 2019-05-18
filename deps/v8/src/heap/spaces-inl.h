@@ -186,8 +186,10 @@ size_t PagedSpace::RelinkFreeListCategories(Page* page) {
     added += category->available();
     category->Relink();
   });
-  DCHECK_EQ(page->AvailableInFreeList(),
-            page->AvailableInFreeListFromAllocatedBytes());
+
+  DCHECK_IMPLIES(!page->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE),
+                 page->AvailableInFreeList() ==
+                     page->AvailableInFreeListFromAllocatedBytes());
   return added;
 }
 
@@ -373,21 +375,16 @@ HeapObject PagedSpace::TryAllocateLinearlyAligned(
   return HeapObject::FromAddress(current_top);
 }
 
-AllocationResult PagedSpace::AllocateRawUnaligned(
-    int size_in_bytes, UpdateSkipList update_skip_list) {
+AllocationResult PagedSpace::AllocateRawUnaligned(int size_in_bytes) {
   DCHECK_IMPLIES(identity() == RO_SPACE, heap()->CanAllocateInReadOnlySpace());
   if (!EnsureLinearAllocationArea(size_in_bytes)) {
     return AllocationResult::Retry(identity());
   }
   HeapObject object = AllocateLinearly(size_in_bytes);
   DCHECK(!object.is_null());
-  if (update_skip_list == UPDATE_SKIP_LIST && identity() == CODE_SPACE) {
-    SkipList::Update(object->address(), size_in_bytes);
-  }
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(object->address(), size_in_bytes);
   return object;
 }
-
 
 AllocationResult PagedSpace::AllocateRawAligned(int size_in_bytes,
                                                 AllocationAlignment alignment) {

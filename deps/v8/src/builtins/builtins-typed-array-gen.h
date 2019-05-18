@@ -6,7 +6,7 @@
 #define V8_BUILTINS_BUILTINS_TYPED_ARRAY_GEN_H_
 
 #include "src/code-stub-assembler.h"
-#include "torque-generated/builtins-typed-array-from-dsl-gen.h"
+#include "torque-generated/builtins-typed-array-gen-tq.h"
 
 namespace v8 {
 namespace internal {
@@ -14,7 +14,7 @@ namespace internal {
 class TypedArrayBuiltinsAssembler : public CodeStubAssembler {
  public:
   using ElementsInfo =
-      TypedArrayBuiltinsFromDSLAssembler::TypedArrayElementsInfo;
+      TorqueGeneratedTypedArrayBuiltinsAssembler::TypedArrayElementsInfo;
   explicit TypedArrayBuiltinsAssembler(compiler::CodeAssemblerState* state)
       : CodeStubAssembler(state) {}
 
@@ -29,7 +29,7 @@ class TypedArrayBuiltinsAssembler : public CodeStubAssembler {
                                                   const char* method_name,
                                                   IterationKind iteration_kind);
 
-  void SetupTypedArray(TNode<JSTypedArray> holder, TNode<Smi> length,
+  void SetupTypedArray(TNode<JSTypedArray> holder, TNode<UintPtrT> length,
                        TNode<UintPtrT> byte_offset,
                        TNode<UintPtrT> byte_length);
   void AttachBuffer(TNode<JSTypedArray> holder, TNode<JSArrayBuffer> buffer,

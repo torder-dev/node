@@ -6,9 +6,9 @@
 #include "src/builtins/builtins.h"
 #include "src/code-factory.h"
 #include "src/compiler.h"
-#include "src/conversions.h"
 #include "src/counters.h"
 #include "src/lookup.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-inl.h"
 #include "src/objects/api-callbacks.h"
 #include "src/string-builder-inl.h"
@@ -114,7 +114,7 @@ MaybeHandle<Object> CreateDynamicFunction(Isolate* isolate,
 
     Handle<Context> context(function->context(), isolate);
     function = isolate->factory()->NewFunctionFromSharedFunctionInfo(
-        map, shared_info, context, NOT_TENURED);
+        map, shared_info, context, AllocationType::kYoung);
   }
   return function;
 }
@@ -150,7 +150,7 @@ BUILTIN(AsyncFunctionConstructor) {
   Handle<JSFunction> func = Handle<JSFunction>::cast(maybe_func);
   Handle<Script> script =
       handle(Script::cast(func->shared()->script()), isolate);
-  int position = script->GetEvalPosition();
+  int position = Script::GetEvalPosition(isolate, script);
   USE(position);
 
   return *func;
@@ -169,7 +169,7 @@ BUILTIN(AsyncGeneratorFunctionConstructor) {
   Handle<JSFunction> func = Handle<JSFunction>::cast(maybe_func);
   Handle<Script> script =
       handle(Script::cast(func->shared()->script()), isolate);
-  int position = script->GetEvalPosition();
+  int position = Script::GetEvalPosition(isolate, script);
   USE(position);
 
   return *func;

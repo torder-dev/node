@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 #include "src/arguments-inl.h"
-#include "src/conversions.h"
 #include "src/counters.h"
 #include "src/heap/heap-inl.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/slots.h"
@@ -398,7 +398,7 @@ RUNTIME_FUNCTION(Runtime_StringToArray) {
       Vector<const uint8_t> chars = content.ToOneByteVector();
       // Note, this will initialize all elements (not only the prefix)
       // to prevent GC from seeing partially initialized array.
-      position = CopyCachedOneByteCharsToArray(isolate->heap(), chars.start(),
+      position = CopyCachedOneByteCharsToArray(isolate->heap(), chars.begin(),
                                                *elements, length);
     } else {
       MemsetTagged(elements->data_start(),

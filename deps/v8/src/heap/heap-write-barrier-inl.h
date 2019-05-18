@@ -19,7 +19,7 @@
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/maybe-object-inl.h"
-#include "src/objects/slots.h"
+#include "src/objects/slots-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -38,12 +38,6 @@ V8_EXPORT_PRIVATE void Heap_GenerationalBarrierForCodeSlow(Code host,
 V8_EXPORT_PRIVATE void Heap_MarkingBarrierForCodeSlow(Code host,
                                                       RelocInfo* rinfo,
                                                       HeapObject object);
-V8_EXPORT_PRIVATE void Heap_GenerationalBarrierForElementsSlow(Heap* heap,
-                                                               FixedArray array,
-                                                               int offset,
-                                                               int length);
-V8_EXPORT_PRIVATE void Heap_MarkingBarrierForElementsSlow(Heap* heap,
-                                                          HeapObject object);
 V8_EXPORT_PRIVATE void Heap_MarkingBarrierForDescriptorArraySlow(
     Heap* heap, HeapObject host, HeapObject descriptor_array,
     int number_of_own_descriptors);
@@ -115,6 +109,23 @@ inline void GenerationalBarrierInternal(HeapObject object, Address slot,
   Heap_GenerationalBarrierSlow(object, slot, value);
 }
 
+inline void GenerationalEphemeronKeyBarrierInternal(EphemeronHashTable table,
+                                                    Address slot,
+                                                    HeapObject value) {
+  DCHECK(Heap::PageFlagsAreConsistent(table));
+  heap_internals::MemoryChunk* value_chunk =
+      heap_internals::MemoryChunk::FromHeapObject(value);
+  heap_internals::MemoryChunk* table_chunk =
+      heap_internals::MemoryChunk::FromHeapObject(table);
+
+  if (!value_chunk->InYoungGeneration() || table_chunk->InYoungGeneration()) {
+    return;
+  }
+
+  Heap* heap = GetHeapFromWritableObject(table);
+  heap->RecordEphemeronKeyWrite(table, slot);
+}
+
 inline void MarkingBarrierInternal(HeapObject object, Address slot,
                                    HeapObject value) {
   DCHECK(Heap_PageFlagsAreConsistent(object));
@@ -149,21 +160,21 @@ inline void GenerationalBarrier(HeapObject object, ObjectSlot slot,
                                               HeapObject::cast(value));
 }
 
+inline void GenerationalEphemeronKeyBarrier(EphemeronHashTable table,
+                                            ObjectSlot slot, Object value) {
+  DCHECK(!HasWeakHeapObjectTag(*slot));
+  DCHECK(!HasWeakHeapObjectTag(value));
+  DCHECK(value->IsHeapObject());
+  heap_internals::GenerationalEphemeronKeyBarrierInternal(
+      table, slot.address(), HeapObject::cast(value));
+}
+
 inline void GenerationalBarrier(HeapObject object, MaybeObjectSlot slot,
                                 MaybeObject value) {
   HeapObject value_heap_object;
   if (!value->GetHeapObject(&value_heap_object)) return;
   heap_internals::GenerationalBarrierInternal(object, slot.address(),
                                               value_heap_object);
-}
-
-inline void GenerationalBarrierForElements(Heap* heap, FixedArray array,
-                                           int offset, int length) {
-  heap_internals::MemoryChunk* array_chunk =
-      heap_internals::MemoryChunk::FromHeapObject(array);
-  if (array_chunk->InYoungGeneration()) return;
-
-  Heap_GenerationalBarrierForElementsSlow(heap, array, offset, length);
 }
 
 inline void GenerationalBarrierForCode(Code host, RelocInfo* rinfo,
@@ -190,17 +201,9 @@ inline void MarkingBarrier(HeapObject object, MaybeObjectSlot slot,
                                          value_heap_object);
 }
 
-inline void MarkingBarrierForElements(Heap* heap, HeapObject object) {
-  heap_internals::MemoryChunk* object_chunk =
-      heap_internals::MemoryChunk::FromHeapObject(object);
-  if (!object_chunk->IsMarking()) return;
-
-  Heap_MarkingBarrierForElementsSlow(heap, object);
-}
-
 inline void MarkingBarrierForCode(Code host, RelocInfo* rinfo,
                                   HeapObject object) {
-  DCHECK(!HasWeakHeapObjectTag(object.ptr()));
+  DCHECK(!HasWeakHeapObjectTag(object));
   heap_internals::MemoryChunk* object_chunk =
       heap_internals::MemoryChunk::FromHeapObject(object);
   if (!object_chunk->IsMarking()) return;

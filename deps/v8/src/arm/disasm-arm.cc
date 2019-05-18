@@ -22,11 +22,11 @@
 // of code into a FILE*, meaning that the above functionality could also be
 // achieved by just calling Disassembler::Disassemble(stdout, begin, end);
 
-
-#include <assert.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <string.h>
+#include <cassert>
+#include <cinttypes>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 
 #if V8_TARGET_ARCH_ARM
 
@@ -264,7 +264,6 @@ void Decoder::PrintPU(Instruction* instr) {
     }
     default: {
       UNREACHABLE();
-      break;
     }
   }
 }
@@ -700,7 +699,6 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
     }
     default: {
       UNREACHABLE();
-      break;
     }
   }
   UNREACHABLE();
@@ -1083,7 +1081,6 @@ void Decoder::DecodeType2(Instruction* instr) {
     default: {
       // The PU field is a 2-bit field.
       UNREACHABLE();
-      break;
     }
   }
 }
@@ -1373,7 +1370,6 @@ void Decoder::DecodeType3(Instruction* instr) {
     default: {
       // The PU field is a 2-bit field.
       UNREACHABLE();
-      break;
     }
   }
 }
@@ -2648,7 +2644,6 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
     default: {
       // The type field is 3-bits in the ARM encoding.
       UNREACHABLE();
-      break;
     }
   }
   return kInstrSize;
@@ -2666,7 +2661,7 @@ namespace disasm {
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
   v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
-  return tmp_buffer_.start();
+  return tmp_buffer_.begin();
 }
 
 
@@ -2722,7 +2717,7 @@ void Disassembler::Disassemble(FILE* f, byte* begin, byte* end,
     byte* prev_pc = pc;
     pc += d.InstructionDecode(buffer, pc);
     v8::internal::PrintF(f, "%p    %08x      %s\n", static_cast<void*>(prev_pc),
-                         *reinterpret_cast<int32_t*>(prev_pc), buffer.start());
+                         *reinterpret_cast<int32_t*>(prev_pc), buffer.begin());
   }
 }
 

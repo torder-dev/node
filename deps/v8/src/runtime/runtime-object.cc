@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 #include "src/arguments-inl.h"
-#include "src/bootstrapper.h"
 #include "src/counters.h"
 #include "src/debug/debug.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
+#include "src/init/bootstrapper.h"
 #include "src/isolate-inl.h"
 #include "src/message-template.h"
 #include "src/objects/hash-table-inl.h"
@@ -100,6 +100,13 @@ bool DeleteObjectPropertyFast(Isolate* isolate, Handle<JSReceiver> receiver,
   // (3) The property to be deleted must be deletable.
   PropertyDetails details = descriptors->GetDetails(descriptor);
   if (!details.IsConfigurable()) return false;
+  // TODO(bmeurer): This optimization is unsound if the property is currently
+  // marked as constant, as there's no way that we can learn that it is not
+  // constant when we later follow the same transition again with a different
+  // value on the same object. As a quick-fix we just disable the optimization
+  // in case of constant fields. We might want to restructure the code here to
+  // update the {map} instead and deoptimize all code that depends on it.
+  if (details.constness() == PropertyConstness::kConst) return false;
   // (4) The map must have a back pointer.
   Object backpointer = map->GetBackPointer();
   if (!backpointer->IsMap()) return false;
@@ -128,8 +135,8 @@ bool DeleteObjectPropertyFast(Isolate* isolate, Handle<JSReceiver> receiver,
       // Slot clearing is the reason why this entire function cannot currently
       // be implemented in the DeleteProperty stub.
       if (index.is_inobject() && !map->IsUnboxedDoubleField(index)) {
-        isolate->heap()->ClearRecordedSlot(
-            *receiver, HeapObject::RawField(*receiver, index.offset()));
+        isolate->heap()->ClearRecordedSlot(*receiver,
+                                           receiver->RawField(index.offset()));
       }
     }
   }
@@ -730,6 +737,15 @@ RUNTIME_FUNCTION(Runtime_NewObject) {
       JSObject::New(target, new_target, Handle<AllocationSite>::null()));
 }
 
+RUNTIME_FUNCTION(Runtime_GetDerivedMap) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(JSFunction, target, 0);
+  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, new_target, 1);
+  RETURN_RESULT_OR_FAILURE(
+      isolate, JSFunction::GetDerivedMap(isolate, target, new_target));
+}
+
 RUNTIME_FUNCTION(Runtime_CompleteInobjectSlackTrackingForMap) {
   DisallowHeapAllocation no_gc;
   HandleScope scope(isolate);
@@ -994,64 +1010,6 @@ RUNTIME_FUNCTION(Runtime_CopyDataPropertiesWithExcludedProperties) {
   return *target;
 }
 
-namespace {
-
-inline void TrySetNative(Handle<Object> maybe_func) {
-  if (!maybe_func->IsJSFunction()) return;
-  JSFunction::cast(*maybe_func)->shared()->set_native(true);
-}
-
-inline void TrySetNativeAndLength(Handle<Object> maybe_func, int length) {
-  if (!maybe_func->IsJSFunction()) return;
-  SharedFunctionInfo shared = JSFunction::cast(*maybe_func)->shared();
-  shared->set_native(true);
-  if (length >= 0) {
-    shared->set_length(length);
-  }
-}
-
-}  // namespace
-
-RUNTIME_FUNCTION(Runtime_DefineMethodsInternal) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  CHECK(isolate->bootstrapper()->IsActive());
-  CONVERT_ARG_HANDLE_CHECKED(JSObject, target, 0);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, source_class, 1);
-  CONVERT_SMI_ARG_CHECKED(length, 2);
-
-  DCHECK(source_class->prototype()->IsJSObject());
-  Handle<JSObject> source(JSObject::cast(source_class->prototype()), isolate);
-
-  Handle<FixedArray> keys;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-      isolate, keys,
-      KeyAccumulator::GetKeys(source, KeyCollectionMode::kOwnOnly,
-                              ALL_PROPERTIES,
-                              GetKeysConversion::kConvertToString));
-
-  for (int i = 0; i < keys->length(); ++i) {
-    Handle<Name> key = Handle<Name>::cast(FixedArray::get(*keys, i, isolate));
-    if (*key == ReadOnlyRoots(isolate).constructor_string()) continue;
-
-    PropertyDescriptor descriptor;
-    Maybe<bool> did_get_descriptor =
-        JSReceiver::GetOwnPropertyDescriptor(isolate, source, key, &descriptor);
-    CHECK(did_get_descriptor.FromJust());
-    if (descriptor.has_value()) {
-      TrySetNativeAndLength(descriptor.value(), length);
-    } else {
-      if (descriptor.has_get()) TrySetNative(descriptor.get());
-      if (descriptor.has_set()) TrySetNative(descriptor.set());
-    }
-
-    Maybe<bool> success = JSReceiver::DefineOwnProperty(
-        isolate, target, key, &descriptor, Just(kDontThrow));
-    CHECK(success.FromJust());
-  }
-  return ReadOnlyRoots(isolate).undefined_value();
-}
-
 RUNTIME_FUNCTION(Runtime_DefineSetterPropertyUnchecked) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
@@ -1103,14 +1061,12 @@ RUNTIME_FUNCTION(Runtime_ToLength) {
   RETURN_RESULT_OR_FAILURE(isolate, Object::ToLength(isolate, input));
 }
 
-
-RUNTIME_FUNCTION(Runtime_ToString) {
+RUNTIME_FUNCTION(Runtime_ToStringRT) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(Object, input, 0);
   RETURN_RESULT_OR_FAILURE(isolate, Object::ToString(isolate, input));
 }
-
 
 RUNTIME_FUNCTION(Runtime_ToName) {
   HandleScope scope(isolate);
@@ -1171,6 +1127,31 @@ RUNTIME_FUNCTION(Runtime_GetOwnPropertyDescriptor) {
 
   if (!found.FromJust()) return ReadOnlyRoots(isolate).undefined_value();
   return *desc.ToPropertyDescriptorObject(isolate);
+}
+
+RUNTIME_FUNCTION(Runtime_AddPrivateBrand) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(args.length(), 2);
+  CONVERT_ARG_HANDLE_CHECKED(JSReceiver, receiver, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Symbol, brand, 1);
+  DCHECK(brand->is_private_name());
+
+  LookupIterator it = LookupIterator::PropertyOrElement(
+      isolate, receiver, brand, LookupIterator::OWN);
+
+  if (it.IsFound()) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewTypeError(MessageTemplate::kVarRedeclaration, brand));
+  }
+
+  PropertyAttributes attributes =
+      static_cast<PropertyAttributes>(DONT_ENUM | DONT_DELETE | READ_ONLY);
+  // TODO(joyee): we could use this slot to store something useful. For now,
+  // store the brand itself.
+  CHECK(Object::AddDataProperty(&it, brand, attributes, Just(kDontThrow),
+                                StoreOrigin::kMaybeKeyed)
+            .FromJust());
+  return *receiver;
 }
 
 RUNTIME_FUNCTION(Runtime_AddPrivateField) {

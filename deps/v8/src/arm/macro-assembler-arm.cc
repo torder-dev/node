@@ -10,16 +10,16 @@
 #include "src/base/bits.h"
 #include "src/base/division-by-constant.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/bootstrapper.h"
 #include "src/callable.h"
 #include "src/code-factory.h"
 #include "src/counters.h"
 #include "src/debug/debug.h"
-#include "src/double.h"
 #include "src/external-reference-table.h"
 #include "src/frames-inl.h"
 #include "src/heap/heap-inl.h"  // For MemoryChunk.
+#include "src/init/bootstrapper.h"
 #include "src/macro-assembler.h"
+#include "src/numbers/double.h"
 #include "src/objects-inl.h"
 #include "src/register-configuration.h"
 #include "src/runtime/runtime.h"
@@ -610,9 +610,8 @@ void TurboAssembler::LoadRoot(Register destination, RootIndex index,
       MemOperand(kRootRegister, RootRegisterOffsetForRootIndex(index)), cond);
 }
 
-
 void MacroAssembler::RecordWriteField(Register object, int offset,
-                                      Register value, Register dst,
+                                      Register value,
                                       LinkRegisterStatus lr_status,
                                       SaveFPRegsMode save_fp,
                                       RememberedSetAction remembered_set_action,
@@ -630,26 +629,21 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   // of the object, so so offset must be a multiple of kPointerSize.
   DCHECK(IsAligned(offset, kPointerSize));
 
-  add(dst, object, Operand(offset - kHeapObjectTag));
   if (emit_debug_code()) {
     Label ok;
-    tst(dst, Operand(kPointerSize - 1));
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    add(scratch, object, Operand(offset - kHeapObjectTag));
+    tst(scratch, Operand(kPointerSize - 1));
     b(eq, &ok);
     stop("Unaligned cell in write barrier");
     bind(&ok);
   }
 
-  RecordWrite(object, dst, value, lr_status, save_fp, remembered_set_action,
-              OMIT_SMI_CHECK);
+  RecordWrite(object, Operand(offset - kHeapObjectTag), value, lr_status,
+              save_fp, remembered_set_action, OMIT_SMI_CHECK);
 
   bind(&done);
-
-  // Clobber clobbered input registers when running with the debug-code flag
-  // turned on to provoke errors.
-  if (emit_debug_code()) {
-    mov(value, Operand(bit_cast<int32_t>(kZapValue + 4)));
-    mov(dst, Operand(bit_cast<int32_t>(kZapValue + 8)));
-  }
 }
 
 void TurboAssembler::SaveRegisters(RegList registers) {
@@ -675,27 +669,46 @@ void TurboAssembler::RestoreRegisters(RegList registers) {
   ldm(ia_w, sp, regs);
 }
 
+void TurboAssembler::CallEphemeronKeyBarrier(Register object, Operand offset,
+                                             SaveFPRegsMode fp_mode) {
+  EphemeronKeyBarrierDescriptor descriptor;
+  RegList registers = descriptor.allocatable_registers();
+
+  SaveRegisters(registers);
+
+  Register object_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kObject));
+  Register slot_parameter(descriptor.GetRegisterParameter(
+      EphemeronKeyBarrierDescriptor::kSlotAddress));
+  Register fp_mode_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kFPMode));
+
+  MoveObjectAndSlot(object_parameter, slot_parameter, object, offset);
+  Move(fp_mode_parameter, Smi::FromEnum(fp_mode));
+  Call(isolate()->builtins()->builtin_handle(Builtins::kEphemeronKeyBarrier),
+       RelocInfo::CODE_TARGET);
+  RestoreRegisters(registers);
+}
+
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode) {
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode) {
   CallRecordWriteStub(
-      object, address, remembered_set_action, fp_mode,
+      object, offset, remembered_set_action, fp_mode,
       isolate()->builtins()->builtin_handle(Builtins::kRecordWrite),
       kNullAddress);
 }
 
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    Address wasm_target) {
-  CallRecordWriteStub(object, address, remembered_set_action, fp_mode,
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode, Address wasm_target) {
+  CallRecordWriteStub(object, offset, remembered_set_action, fp_mode,
                       Handle<Code>::null(), wasm_target);
 }
 
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    Handle<Code> code_target, Address wasm_target) {
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode, Handle<Code> code_target, Address wasm_target) {
   DCHECK_NE(code_target.is_null(), wasm_target == kNullAddress);
   // TODO(albertnetymk): For now we ignore remembered_set_action and fp_mode,
   // i.e. always emit remember set and save FP registers in RecordWriteStub. If
@@ -716,7 +729,7 @@ void TurboAssembler::CallRecordWriteStub(
   Register fp_mode_parameter(
       descriptor.GetRegisterParameter(RecordWriteDescriptor::kFPMode));
 
-  MovePair(object_parameter, object, slot_parameter, address);
+  MoveObjectAndSlot(object_parameter, slot_parameter, object, offset);
 
   Move(remembered_set_parameter, Smi::FromEnum(remembered_set_action));
   Move(fp_mode_parameter, Smi::FromEnum(fp_mode));
@@ -729,20 +742,54 @@ void TurboAssembler::CallRecordWriteStub(
   RestoreRegisters(registers);
 }
 
-// Will clobber 3 registers: object, address, and value. The register 'object'
-// contains a heap object pointer. The heap object tag is shifted away.
-// A scratch register also needs to be available.
-void MacroAssembler::RecordWrite(Register object, Register address,
+void TurboAssembler::MoveObjectAndSlot(Register dst_object, Register dst_slot,
+                                       Register object, Operand offset) {
+  DCHECK_NE(dst_object, dst_slot);
+  DCHECK(offset.IsRegister() || offset.IsImmediate());
+  // If `offset` is a register, it cannot overlap with `object`.
+  DCHECK_IMPLIES(offset.IsRegister(), offset.rm() != object);
+
+  // If the slot register does not overlap with the object register, we can
+  // overwrite it.
+  if (dst_slot != object) {
+    add(dst_slot, object, offset);
+    Move(dst_object, object);
+    return;
+  }
+
+  DCHECK_EQ(dst_slot, object);
+
+  // If the destination object register does not overlap with the offset
+  // register, we can overwrite it.
+  if (!offset.IsRegister() || (offset.rm() != dst_object)) {
+    Move(dst_object, dst_slot);
+    add(dst_slot, dst_slot, offset);
+    return;
+  }
+
+  DCHECK_EQ(dst_object, offset.rm());
+
+  // We only have `dst_slot` and `dst_object` left as distinct registers so we
+  // have to swap them. We write this as a add+sub sequence to avoid using a
+  // scratch register.
+  add(dst_slot, dst_slot, dst_object);
+  sub(dst_object, dst_slot, dst_object);
+}
+
+// The register 'object' contains a heap object pointer. The heap object tag is
+// shifted away. A scratch register also needs to be available.
+void MacroAssembler::RecordWrite(Register object, Operand offset,
                                  Register value, LinkRegisterStatus lr_status,
                                  SaveFPRegsMode fp_mode,
                                  RememberedSetAction remembered_set_action,
                                  SmiCheck smi_check) {
-  DCHECK(object != value);
+  DCHECK_NE(object, value);
   if (emit_debug_code()) {
     {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      ldr(scratch, MemOperand(address));
+      add(scratch, object, offset);
+      ldr(scratch, MemOperand(scratch));
       cmp(scratch, value);
     }
     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
@@ -761,40 +808,21 @@ void MacroAssembler::RecordWrite(Register object, Register address,
     JumpIfSmi(value, &done);
   }
 
-  CheckPageFlag(value,
-                value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
-  CheckPageFlag(object,
-                value,  // Used as scratch.
-                MemoryChunk::kPointersFromHereAreInterestingMask,
-                eq,
+  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                &done);
+  CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, eq,
                 &done);
 
   // Record the actual write.
   if (lr_status == kLRHasNotBeenSaved) {
     push(lr);
   }
-  CallRecordWriteStub(object, address, remembered_set_action, fp_mode);
+  CallRecordWriteStub(object, offset, remembered_set_action, fp_mode);
   if (lr_status == kLRHasNotBeenSaved) {
     pop(lr);
   }
 
   bind(&done);
-
-  // Count number of write barriers in generated code.
-  isolate()->counters()->write_barriers_static()->Increment();
-  {
-    UseScratchRegisterScope temps(this);
-    IncrementCounter(isolate()->counters()->write_barriers_dynamic(), 1,
-                     temps.Acquire(), value);
-  }
-
-  // Clobber clobbered registers when running with the debug-code flag
-  // turned on to provoke errors.
-  if (emit_debug_code()) {
-    mov(address, Operand(bit_cast<int32_t>(kZapValue + 12)));
-    mov(value, Operand(bit_cast<int32_t>(kZapValue + 16)));
-  }
 }
 
 void TurboAssembler::PushCommonFrame(Register marker_reg) {
@@ -831,7 +859,7 @@ void MacroAssembler::PushSafepointRegisters() {
   // stack, so adjust the stack for unsaved registers.
   const int num_unsaved = kNumSafepointRegisters - kNumSafepointSavedRegisters;
   DCHECK_GE(num_unsaved, 0);
-  sub(sp, sp, Operand(num_unsaved * kPointerSize));
+  AllocateStackSpace(num_unsaved * kPointerSize);
   stm(db_w, sp, kSafepointSavedRegisters);
 }
 
@@ -1294,6 +1322,44 @@ int TurboAssembler::LeaveFrame(StackFrame::Type type) {
   return frame_ends;
 }
 
+#ifdef V8_OS_WIN
+void TurboAssembler::AllocateStackSpace(Register bytes_scratch) {
+  // "Functions that allocate 4 KB or more on the stack must ensure that each
+  // page prior to the final page is touched in order." Source:
+  // https://docs.microsoft.com/en-us/cpp/build/overview-of-arm-abi-conventions?view=vs-2019#stack
+  UseScratchRegisterScope temps(this);
+  DwVfpRegister scratch = temps.AcquireD();
+  Label check_offset;
+  Label touch_next_page;
+  jmp(&check_offset);
+  bind(&touch_next_page);
+  sub(sp, sp, Operand(kStackPageSize));
+  // Just to touch the page, before we increment further.
+  vldr(scratch, MemOperand(sp));
+  sub(bytes_scratch, bytes_scratch, Operand(kStackPageSize));
+
+  bind(&check_offset);
+  cmp(bytes_scratch, Operand(kStackPageSize));
+  b(gt, &touch_next_page);
+
+  sub(sp, sp, bytes_scratch);
+}
+
+void TurboAssembler::AllocateStackSpace(int bytes) {
+  UseScratchRegisterScope temps(this);
+  DwVfpRegister scratch = no_dreg;
+  while (bytes > kStackPageSize) {
+    if (scratch == no_dreg) {
+      scratch = temps.AcquireD();
+    }
+    sub(sp, sp, Operand(kStackPageSize));
+    vldr(scratch, MemOperand(sp));
+    bytes -= kStackPageSize;
+  }
+  sub(sp, sp, Operand(bytes));
+}
+#endif
+
 void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
                                     StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
@@ -1307,14 +1373,12 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
   DCHECK_EQ(0 * kPointerSize, ExitFrameConstants::kCallerFPOffset);
   mov(scratch, Operand(StackFrame::TypeToMarker(frame_type)));
   PushCommonFrame(scratch);
-  // Reserve room for saved entry sp and code object.
+  // Reserve room for saved entry sp.
   sub(sp, fp, Operand(ExitFrameConstants::kFixedFrameSizeFromFp));
   if (emit_debug_code()) {
     mov(scratch, Operand::Zero());
     str(scratch, MemOperand(fp, ExitFrameConstants::kSPOffset));
   }
-  Move(scratch, CodeObject());
-  str(scratch, MemOperand(fp, ExitFrameConstants::kCodeOffset));
 
   // Save the frame pointer and the context in top.
   Move(scratch, ExternalReference::Create(IsolateAddressId::kCEntryFPAddress,
@@ -1336,7 +1400,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
   // Reserve place for the return address and stack space and align the frame
   // preparing for calling the runtime function.
   const int frame_alignment = MacroAssembler::ActivationFrameAlignment();
-  sub(sp, sp, Operand((stack_space + 1) * kPointerSize));
+  AllocateStackSpace((stack_space + 1) * kPointerSize);
   if (frame_alignment > 0) {
     DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
     and_(sp, sp, Operand(-frame_alignment));
@@ -1798,7 +1862,7 @@ void TurboAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
 
   // If we fell through then inline version didn't succeed - call stub instead.
   push(lr);
-  sub(sp, sp, Operand(kDoubleSize));  // Put input on stack.
+  AllocateStackSpace(kDoubleSize);  // Put input on stack.
   vstr(double_input, MemOperand(sp, 0));
 
   if (stub_mode == StubCallMode::kCallWasmRuntimeStub) {
@@ -2327,12 +2391,12 @@ void TurboAssembler::PrepareCallCFunction(int num_reg_arguments,
     // Make stack end at alignment and make room for num_arguments - 4 words
     // and the original value of sp.
     mov(scratch, sp);
-    sub(sp, sp, Operand((stack_passed_arguments + 1) * kPointerSize));
+    AllocateStackSpace((stack_passed_arguments + 1) * kPointerSize);
     DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
     and_(sp, sp, Operand(-frame_alignment));
     str(scratch, MemOperand(sp, stack_passed_arguments * kPointerSize));
   } else if (stack_passed_arguments > 0) {
-    sub(sp, sp, Operand(stack_passed_arguments * kPointerSize));
+    AllocateStackSpace(stack_passed_arguments * kPointerSize);
   }
 }
 
@@ -2447,8 +2511,10 @@ void TurboAssembler::CallCFunctionHelper(Register function,
   }
 }
 
-void TurboAssembler::CheckPageFlag(Register object, Register scratch, int mask,
-                                   Condition cc, Label* condition_met) {
+void TurboAssembler::CheckPageFlag(Register object, int mask, Condition cc,
+                                   Label* condition_met) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
   DCHECK(cc == eq || cc == ne);
   Bfc(scratch, object, 0, kPageSizeBits);
   ldr(scratch, MemOperand(scratch, MemoryChunk::kFlagsOffset));

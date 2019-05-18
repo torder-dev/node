@@ -304,11 +304,11 @@ namespace internal {
     "a location, got %")                                                       \
   T(InvalidArrayBufferLength, "Invalid array buffer length")                   \
   T(ArrayBufferAllocationFailed, "Array buffer allocation failed")             \
+  T(Invalid, "Invalid %s : %")                                                 \
   T(InvalidArrayLength, "Invalid array length")                                \
   T(InvalidAtomicAccessIndex, "Invalid atomic access index")                   \
   T(InvalidCodePoint, "Invalid code point %")                                  \
   T(InvalidCountValue, "Invalid count value")                                  \
-  T(InvalidCurrencyCode, "Invalid currency code: %")                           \
   T(InvalidDataViewAccessorOffset,                                             \
     "Offset is outside the bounds of the DataView")                            \
   T(InvalidDataViewLength, "Invalid DataView length %")                        \
@@ -324,9 +324,6 @@ namespace internal {
   T(InvalidTypedArrayAlignment, "% of % should be a multiple of %")            \
   T(InvalidTypedArrayIndex, "Invalid typed array index")                       \
   T(InvalidTypedArrayLength, "Invalid typed array length: %")                  \
-  T(IllegalTypeWhileStyleNarrow,                                               \
-    "When style is 'narrow', 'unit' is the only allowed value for the type "   \
-    "option.")                                                                 \
   T(LetInLexicalBinding, "let is disallowed as a lexically bound name")        \
   T(LocaleMatcher, "Illegal value for localeMatcher:%")                        \
   T(NormalizationForm, "The normalization form should be one of %.")           \
@@ -365,6 +362,7 @@ namespace internal {
     "Duplicate __proto__ fields are not allowed in object literals")           \
   T(ForInOfLoopInitializer,                                                    \
     "% loop variable declaration may not have an initializer.")                \
+  T(ForOfLet, "The left-hand side of a for-of loop may not start with 'let'.") \
   T(ForInOfLoopMultiBindings,                                                  \
     "Invalid left-hand side in % loop: Must have a single binding.")           \
   T(GeneratorInSingleStatementContext,                                         \
@@ -400,7 +398,7 @@ namespace internal {
   T(InvalidRegExpFlags, "Invalid flags supplied to RegExp constructor '%'")    \
   T(InvalidOrUnexpectedToken, "Invalid or unexpected token")                   \
   T(InvalidPrivateFieldResolution,                                             \
-    "Undefined private field %: must be declared in an enclosing class")       \
+    "Private field '%' must be declared in an enclosing class")                \
   T(InvalidPrivateFieldRead,                                                   \
     "Read of private field % from an object which did not contain the field")  \
   T(InvalidPrivateFieldWrite,                                                  \
@@ -417,6 +415,7 @@ namespace internal {
   T(MalformedRegExp, "Invalid regular expression: /%/: %")                     \
   T(MalformedRegExpFlags, "Invalid regular expression flags")                  \
   T(ModuleExportUndefined, "Export '%' is not defined in module")              \
+  T(MissingFunctionName, "Function statements require a function name")        \
   T(HtmlCommentInModule, "HTML comments are not allowed in modules")           \
   T(MultipleDefaultsInSwitch,                                                  \
     "More than one default clause in switch statement")                        \

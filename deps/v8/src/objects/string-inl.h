@@ -7,10 +7,10 @@
 
 #include "src/objects/string.h"
 
-#include "src/conversions-inl.h"
 #include "src/handles-inl.h"
 #include "src/hash-seed-inl.h"
 #include "src/heap/factory.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/objects/name-inl.h"
 #include "src/objects/smi-inl.h"
 #include "src/objects/string-table-inl.h"
@@ -195,29 +195,43 @@ Char FlatStringReader::Get(int index) {
 }
 
 template <typename Char>
-class SequentialStringKey : public StringTableKey {
+class SequentialStringKey final : public StringTableKey {
  public:
-  explicit SequentialStringKey(Vector<const Char> string, uint64_t seed)
-      : StringTableKey(StringHasher::HashSequentialString<Char>(
-            string.start(), string.length(), seed)),
-        string_(string) {}
+  SequentialStringKey(const Vector<const Char>& chars, uint64_t seed)
+      : SequentialStringKey(StringHasher::HashSequentialString<Char>(
+                                chars.begin(), chars.length(), seed),
+                            chars) {}
 
-  Vector<const Char> string_;
-};
+  SequentialStringKey(int hash, const Vector<const Char>& chars)
+      : StringTableKey(hash, chars.length()), chars_(chars) {}
 
-class OneByteStringKey : public SequentialStringKey<uint8_t> {
- public:
-  OneByteStringKey(Vector<const uint8_t> str, uint64_t seed)
-      : SequentialStringKey<uint8_t>(str, seed) {}
-
-  bool IsMatch(Object string) override {
-    return String::cast(string)->IsOneByteEqualTo(string_);
+  bool IsMatch(String s) override {
+    DisallowHeapAllocation no_gc;
+    if (s->IsOneByteRepresentation()) {
+      const uint8_t* chars = s.GetChars<uint8_t>(no_gc);
+      return CompareChars(chars, chars_.begin(), chars_.length()) == 0;
+    }
+    const uint16_t* chars = s.GetChars<uint16_t>(no_gc);
+    return CompareChars(chars, chars_.begin(), chars_.length()) == 0;
   }
 
-  Handle<String> AsHandle(Isolate* isolate) override;
+  Handle<String> AsHandle(Isolate* isolate) override {
+    if (sizeof(Char) == 1) {
+      return isolate->factory()->NewOneByteInternalizedString(
+          Vector<const uint8_t>::cast(chars_), hash_field());
+    }
+    return isolate->factory()->NewTwoByteInternalizedString(
+        Vector<const uint16_t>::cast(chars_), hash_field());
+  }
+
+ private:
+  Vector<const Char> chars_;
 };
 
-class SeqOneByteSubStringKey : public StringTableKey {
+using OneByteStringKey = SequentialStringKey<uint8_t>;
+using TwoByteStringKey = SequentialStringKey<uint16_t>;
+
+class SeqOneByteSubStringKey final : public StringTableKey {
  public:
 // VS 2017 on official builds gives this spurious warning:
 // warning C4789: buffer 'key' of size 16 bytes will be overrun; 4 bytes will
@@ -228,62 +242,41 @@ class SeqOneByteSubStringKey : public StringTableKey {
 #pragma warning(disable : 4789)
 #endif
   SeqOneByteSubStringKey(Isolate* isolate, Handle<SeqOneByteString> string,
-                         int from, int length)
-      : StringTableKey(0), string_(string), from_(from), length_(length) {
+                         int from, int len)
+      : StringTableKey(0, len), string_(string), from_(from) {
     // We have to set the hash later.
     DisallowHeapAllocation no_gc;
     uint32_t hash = StringHasher::HashSequentialString(
-        string->GetChars(no_gc) + from, length, HashSeed(isolate));
+        string->GetChars(no_gc) + from, len, HashSeed(isolate));
     set_hash_field(hash);
 
-    DCHECK_LE(0, length_);
-    DCHECK_LE(from_ + length_, string_->length());
+    DCHECK_LE(0, length());
+    DCHECK_LE(from_ + length(), string_->length());
     DCHECK(string_->IsSeqOneByteString());
   }
 #if defined(V8_CC_MSVC)
 #pragma warning(pop)
 #endif
 
-  bool IsMatch(Object string) override;
-  Handle<String> AsHandle(Isolate* isolate) override;
+  bool IsMatch(String string) override {
+    DisallowHeapAllocation no_gc;
+    if (string.IsOneByteRepresentation()) {
+      const uint8_t* data = string.GetChars<uint8_t>(no_gc);
+      return CompareChars(string_->GetChars(no_gc) + from_, data, length()) ==
+             0;
+    }
+    const uint16_t* data = string.GetChars<uint16_t>(no_gc);
+    return CompareChars(string_->GetChars(no_gc) + from_, data, length()) == 0;
+  }
+
+  Handle<String> AsHandle(Isolate* isolate) override {
+    return isolate->factory()->NewOneByteInternalizedSubString(
+        string_, from_, length(), hash_field());
+  }
 
  private:
   Handle<SeqOneByteString> string_;
   int from_;
-  int length_;
-};
-
-class TwoByteStringKey : public SequentialStringKey<uc16> {
- public:
-  explicit TwoByteStringKey(Vector<const uc16> str, uint64_t seed)
-      : SequentialStringKey<uc16>(str, seed) {}
-
-  bool IsMatch(Object string) override {
-    return String::cast(string)->IsTwoByteEqualTo(string_);
-  }
-
-  Handle<String> AsHandle(Isolate* isolate) override;
-};
-
-// Utf8StringKey carries a vector of chars as key.
-class Utf8StringKey : public StringTableKey {
- public:
-  explicit Utf8StringKey(Vector<const char> string, uint64_t seed)
-      : StringTableKey(StringHasher::ComputeUtf8Hash(string, seed, &chars_)),
-        string_(string) {}
-
-  bool IsMatch(Object string) override {
-    return String::cast(string)->IsUtf8EqualTo(string_);
-  }
-
-  Handle<String> AsHandle(Isolate* isolate) override {
-    return isolate->factory()->NewInternalizedStringFromUtf8(string_, chars_,
-                                                             HashField());
-  }
-
- private:
-  Vector<const char> string_;
-  int chars_;  // Caches the number of characters when computing the hash code.
 };
 
 bool String::Equals(String other) {
@@ -302,14 +295,21 @@ bool String::Equals(Isolate* isolate, Handle<String> one, Handle<String> two) {
   return SlowEquals(isolate, one, two);
 }
 
+template <typename Char>
+const Char* String::GetChars(const DisallowHeapAllocation& no_gc) {
+  return StringShape(*this).IsExternal()
+             ? CharTraits<Char>::ExternalString::cast(*this).GetChars()
+             : CharTraits<Char>::String::cast(*this).GetChars(no_gc);
+}
+
 Handle<String> String::Flatten(Isolate* isolate, Handle<String> string,
-                               PretenureFlag pretenure) {
+                               AllocationType allocation) {
   if (string->IsConsString()) {
     Handle<ConsString> cons = Handle<ConsString>::cast(string);
     if (cons->IsFlat()) {
       string = handle(cons->first(), isolate);
     } else {
-      return SlowFlatten(isolate, cons, pretenure);
+      return SlowFlatten(isolate, cons, allocation);
     }
   }
   if (string->IsThinString()) {
@@ -323,24 +323,22 @@ uint16_t String::Get(int index) {
   DCHECK(index >= 0 && index < length());
   switch (StringShape(*this).full_representation_tag()) {
     case kSeqStringTag | kOneByteStringTag:
-      return SeqOneByteString::cast(*this)->SeqOneByteStringGet(index);
+      return SeqOneByteString::cast(*this)->Get(index);
     case kSeqStringTag | kTwoByteStringTag:
-      return SeqTwoByteString::cast(*this)->SeqTwoByteStringGet(index);
+      return SeqTwoByteString::cast(*this)->Get(index);
     case kConsStringTag | kOneByteStringTag:
     case kConsStringTag | kTwoByteStringTag:
-      return ConsString::cast(*this)->ConsStringGet(index);
+      return ConsString::cast(*this)->Get(index);
     case kExternalStringTag | kOneByteStringTag:
-      return ExternalOneByteString::cast(*this)->ExternalOneByteStringGet(
-          index);
+      return ExternalOneByteString::cast(*this)->Get(index);
     case kExternalStringTag | kTwoByteStringTag:
-      return ExternalTwoByteString::cast(*this)->ExternalTwoByteStringGet(
-          index);
+      return ExternalTwoByteString::cast(*this)->Get(index);
     case kSlicedStringTag | kOneByteStringTag:
     case kSlicedStringTag | kTwoByteStringTag:
-      return SlicedString::cast(*this)->SlicedStringGet(index);
+      return SlicedString::cast(*this)->Get(index);
     case kThinStringTag | kOneByteStringTag:
     case kThinStringTag | kTwoByteStringTag:
-      return ThinString::cast(*this)->ThinStringGet(index);
+      return ThinString::cast(*this)->Get(index);
     default:
       break;
   }
@@ -455,7 +453,7 @@ uint32_t String::ToValidIndex(Object number) {
   return index;
 }
 
-uint16_t SeqOneByteString::SeqOneByteStringGet(int index) {
+uint8_t SeqOneByteString::Get(int index) {
   DCHECK(index >= 0 && index < length());
   return READ_BYTE_FIELD(*this, kHeaderSize + index * kCharSize);
 }
@@ -484,7 +482,7 @@ uc16* SeqTwoByteString::GetChars(const DisallowHeapAllocation& no_gc) {
   return reinterpret_cast<uc16*>(FIELD_ADDR(*this, kHeaderSize));
 }
 
-uint16_t SeqTwoByteString::SeqTwoByteStringGet(int index) {
+uint16_t SeqTwoByteString::Get(int index) {
   DCHECK(index >= 0 && index < length());
   return READ_UINT16_FIELD(*this, kHeaderSize + index * kShortSize);
 }
@@ -618,7 +616,7 @@ const uint8_t* ExternalOneByteString::GetChars() {
   return reinterpret_cast<const uint8_t*>(resource()->data());
 }
 
-uint16_t ExternalOneByteString::ExternalOneByteStringGet(int index) {
+uint8_t ExternalOneByteString::Get(int index) {
   DCHECK(index >= 0 && index < length());
   return GetChars()[index];
 }
@@ -652,7 +650,7 @@ void ExternalTwoByteString::set_resource(
 
 const uint16_t* ExternalTwoByteString::GetChars() { return resource()->data(); }
 
-uint16_t ExternalTwoByteString::ExternalTwoByteStringGet(int index) {
+uint16_t ExternalTwoByteString::Get(int index) {
   DCHECK(index >= 0 && index < length());
   return GetChars()[index];
 }
@@ -750,11 +748,11 @@ SubStringRange::SubStringRange(String string,
 
 class SubStringRange::iterator final {
  public:
-  typedef std::forward_iterator_tag iterator_category;
-  typedef int difference_type;
-  typedef uc16 value_type;
-  typedef uc16* pointer;
-  typedef uc16& reference;
+  using iterator_category = std::forward_iterator_tag;
+  using difference_type = int;
+  using value_type = uc16;
+  using pointer = uc16*;
+  using reference = uc16&;
 
   iterator(const iterator& other) = default;
 

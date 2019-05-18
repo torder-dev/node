@@ -1,3 +1,7 @@
+# Eng reviewer. Please reach out before adding new top-level directories.
+# Disagreement among owners should be escalated to eng reviewers.
+file://ENG_REVIEW_OWNERS
+
 adamk@chromium.org
 ahaas@chromium.org
 aseemgarg@chromium.org
@@ -31,6 +35,7 @@ petermarshall@chromium.org
 rmcilroy@chromium.org
 sergiyb@chromium.org
 sigurds@chromium.org
+szuend@chromium.org
 tebbi@chromium.org
 titzer@chromium.org
 ulan@chromium.org

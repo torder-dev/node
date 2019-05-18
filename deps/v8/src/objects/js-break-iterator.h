@@ -15,6 +15,7 @@
 #include "src/objects.h"
 #include "src/objects/intl-objects.h"
 #include "src/objects/managed.h"
+#include "torque-generated/field-offsets-tq.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -35,7 +36,7 @@ class JSV8BreakIterator : public JSObject {
   static Handle<JSObject> ResolvedOptions(
       Isolate* isolate, Handle<JSV8BreakIterator> break_iterator);
 
-  static const std::set<std::string>& GetAvailableLocales();
+  V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
   static void AdoptText(Isolate* isolate,
                         Handle<JSV8BreakIterator> break_iterator,
@@ -70,22 +71,8 @@ class JSV8BreakIterator : public JSObject {
   DECL_ACCESSORS(bound_break_type, Object)
 
 // Layout description.
-#define BREAK_ITERATOR_FIELDS(V)        \
-  /* Pointer fields. */                 \
-  V(kLocaleOffset, kTaggedSize)         \
-  V(kTypeOffset, kTaggedSize)           \
-  V(kBreakIteratorOffset, kTaggedSize)  \
-  V(kUnicodeStringOffset, kTaggedSize)  \
-  V(kBoundAdoptTextOffset, kTaggedSize) \
-  V(kBoundFirstOffset, kTaggedSize)     \
-  V(kBoundNextOffset, kTaggedSize)      \
-  V(kBoundCurrentOffset, kTaggedSize)   \
-  V(kBoundBreakTypeOffset, kTaggedSize) \
-  /* Total Size */                      \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, BREAK_ITERATOR_FIELDS)
-#undef BREAK_ITERATOR_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                TORQUE_GENERATED_JSV8BREAK_ITERATOR_FIELDS)
 
   OBJECT_CONSTRUCTORS(JSV8BreakIterator, JSObject);
 };

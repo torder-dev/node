@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/api.h"
+#include "src/api/api.h"
 #include "src/arm64/assembler-arm64-inl.h"
 #include "src/arm64/macro-assembler-arm64-inl.h"
 #include "src/deoptimizer.h"
@@ -55,12 +55,6 @@ void CopyRegListToFrame(MacroAssembler* masm, const Register& dst,
   masm->Sub(dst, dst, dst_offset);
 }
 
-// TODO(jgruber): There's a hack here to explicitly skip restoration of the
-// so-called 'arm64 platform register' x18. The register may be in use by the
-// OS, thus we should not clobber it. Instead of this hack, it would be nicer
-// not to add x18 to the list of saved registers in the first place. The
-// complication here is that we require `reg_list.Count() % 2 == 0` in multiple
-// spots.
 void RestoreRegList(MacroAssembler* masm, const CPURegList& reg_list,
                     const Register& src_base, int src_offset) {
   DCHECK_EQ(reg_list.Count() % 2, 0);
@@ -74,8 +68,8 @@ void RestoreRegList(MacroAssembler* masm, const CPURegList& reg_list,
   Register src = temps.AcquireX();
   masm->Add(src, src_base, src_offset);
 
-  // x18 is the platform register and is reserved for the use of platform ABIs.
-  restore_list.Remove(x18);
+  // No need to restore padreg.
+  restore_list.Remove(padreg);
 
   // Restore every register in restore_list from src.
   while (!restore_list.IsEmpty()) {
@@ -123,11 +117,14 @@ void Deoptimizer::GenerateDeoptimizationEntries(MacroAssembler* masm,
   DCHECK_EQ(saved_float_registers.Count() % 4, 0);
   __ PushCPURegList(saved_float_registers);
 
-  // We save all the registers except sp, lr and the masm scratches.
+  // We save all the registers except sp, lr, platform register (x18) and the
+  // masm scratches.
   CPURegList saved_registers(CPURegister::kRegister, kXRegSizeInBits, 0, 28);
   saved_registers.Remove(ip0);
   saved_registers.Remove(ip1);
+  saved_registers.Remove(x18);
   saved_registers.Combine(fp);
+  saved_registers.Align();
   DCHECK_EQ(saved_registers.Count() % 2, 0);
   __ PushCPURegList(saved_registers);
 

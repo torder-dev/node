@@ -24,6 +24,8 @@
 #include "src/roots.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
+#include "src/tracing/trace-event.h"
+#include "src/tracing/traced-value.h"
 
 namespace v8 {
 namespace internal {
@@ -48,14 +50,18 @@ void Deserializer::Initialize(Isolate* isolate) {
   DCHECK_NOT_NULL(isolate);
   isolate_ = isolate;
   allocator()->Initialize(isolate->heap());
-  DCHECK_NULL(external_reference_table_);
-  external_reference_table_ = isolate->external_reference_table();
+
 #ifdef DEBUG
-  // Count the number of external references registered through the API.
-  num_api_references_ = 0;
-  if (isolate_->api_external_references() != nullptr) {
-    while (isolate_->api_external_references()[num_api_references_] != 0) {
-      num_api_references_++;
+  // The read-only deserializer is run by read-only heap set-up before the heap
+  // is fully set up. External reference table relies on a few parts of this
+  // set-up (like old-space), so it may be uninitialized at this point.
+  if (isolate->isolate_data()->external_reference_table()->is_initialized()) {
+    // Count the number of external references registered through the API.
+    num_api_references_ = 0;
+    if (isolate_->api_external_references() != nullptr) {
+      while (isolate_->api_external_references()[num_api_references_] != 0) {
+        num_api_references_++;
+      }
     }
   }
 #endif  // DEBUG
@@ -64,8 +70,9 @@ void Deserializer::Initialize(Isolate* isolate) {
 
 void Deserializer::Rehash() {
   DCHECK(can_rehash() || deserializing_user_code());
-  for (HeapObject item : to_rehash_)
-    item->RehashBasedOnMap(ReadOnlyRoots(isolate()));
+  for (HeapObject item : to_rehash_) {
+    item->RehashBasedOnMap(ReadOnlyRoots(isolate_));
+  }
 }
 
 Deserializer::~Deserializer() {
@@ -149,19 +156,24 @@ void Deserializer::LogScriptEvents(Script script) {
   LOG(isolate_,
       ScriptEvent(Logger::ScriptEventType::kDeserialize, script->id()));
   LOG(isolate_, ScriptDetails(script));
+  TRACE_EVENT_OBJECT_CREATED_WITH_ID(
+      TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
+      TRACE_ID_WITH_SCOPE("v8::internal::Script", script->id()));
+  TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID(
+      TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
+      TRACE_ID_WITH_SCOPE("v8::internal::Script", script->id()),
+      script->ToTracedValue());
 }
 
 StringTableInsertionKey::StringTableInsertionKey(String string)
-    : StringTableKey(ComputeHashField(string)), string_(string) {
+    : StringTableKey(ComputeHashField(string), string.length()),
+      string_(string) {
   DCHECK(string->IsInternalizedString());
 }
 
-bool StringTableInsertionKey::IsMatch(Object string) {
-  // We know that all entries in a hash table had their hash keys created.
-  // Use that knowledge to have fast failure.
-  if (Hash() != String::cast(string)->Hash()) return false;
-  // We want to compare the content of two internalized strings here.
-  return string_->SlowEquals(String::cast(string));
+bool StringTableInsertionKey::IsMatch(String string) {
+  // We want to compare the content of two strings here.
+  return string_->SlowEquals(string);
 }
 
 Handle<String> StringTableInsertionKey::AsHandle(Isolate* isolate) {
@@ -174,12 +186,32 @@ uint32_t StringTableInsertionKey::ComputeHashField(String string) {
   return string->hash_field();
 }
 
+namespace {
+
+String ForwardStringIfExists(Isolate* isolate, StringTableInsertionKey* key) {
+  StringTable table = isolate->heap()->string_table();
+  int entry = table.FindEntry(isolate, key);
+  if (entry == kNotFound) return String();
+
+  String canonical = String::cast(table->KeyAt(entry));
+  DCHECK_NE(canonical, key->string());
+  key->string().MakeThin(isolate, canonical);
+  return canonical;
+}
+
+}  // namespace
+
 HeapObject Deserializer::PostProcessNewObject(HeapObject obj, int space) {
   if ((FLAG_rehash_snapshot && can_rehash_) || deserializing_user_code()) {
     if (obj->IsString()) {
       // Uninitialize hash field as we need to recompute the hash.
       String string = String::cast(obj);
       string->set_hash_field(String::kEmptyHashField);
+      // Rehash strings before read-only space is sealed. Strings outside
+      // read-only space are rehashed lazily. (e.g. when rehashing dictionaries)
+      if (space == RO_SPACE) {
+        to_rehash_.push_back(obj);
+      }
     } else if (obj->NeedsRehashing()) {
       to_rehash_.push_back(obj);
     }
@@ -192,8 +224,7 @@ HeapObject Deserializer::PostProcessNewObject(HeapObject obj, int space) {
         // Canonicalize the internalized string. If it already exists in the
         // string table, set it to forward to the existing one.
         StringTableInsertionKey key(string);
-        String canonical =
-            StringTable::ForwardStringIfExists(isolate_, &key, string);
+        String canonical = ForwardStringIfExists(isolate_, &key);
 
         if (!canonical.is_null()) return canonical;
 
@@ -250,6 +281,12 @@ HeapObject Deserializer::PostProcessNewObject(HeapObject obj, int space) {
                                              string->ExternalPayloadSize());
     }
     isolate_->heap()->RegisterExternalString(String::cast(obj));
+  } else if (obj->IsJSDataView()) {
+    JSDataView data_view = JSDataView::cast(obj);
+    JSArrayBuffer buffer = JSArrayBuffer::cast(data_view.buffer());
+    data_view.set_data_pointer(
+        reinterpret_cast<uint8_t*>(buffer.backing_store()) +
+        data_view.byte_offset());
   } else if (obj->IsJSTypedArray()) {
     JSTypedArray typed_array = JSTypedArray::cast(obj);
     CHECK_LE(typed_array->byte_offset(), Smi::kMaxValue);
@@ -287,8 +324,6 @@ HeapObject Deserializer::PostProcessNewObject(HeapObject obj, int space) {
     // TODO(mythria): Remove these once we store the default values for these
     // fields in the serializer.
     BytecodeArray bytecode_array = BytecodeArray::cast(obj);
-    bytecode_array->set_interrupt_budget(
-        interpreter::Interpreter::InterruptBudget());
     bytecode_array->set_osr_loop_nesting_level(0);
   }
 #ifdef DEBUG
@@ -344,7 +379,7 @@ HeapObject Deserializer::GetBackReferencedObject(int space) {
   }
 
   hot_objects_.Add(obj);
-  DCHECK(!HasWeakHeapObjectTag(obj->ptr()));
+  DCHECK(!HasWeakHeapObjectTag(obj));
   return obj;
 }
 
@@ -765,7 +800,7 @@ bool Deserializer::ReadData(TSlot current, TSlot limit, int source_space,
 
 Address Deserializer::ReadExternalReferenceCase() {
   uint32_t reference_id = static_cast<uint32_t>(source_.GetInt());
-  return external_reference_table_->address(reference_id);
+  return isolate_->external_reference_table()->address(reference_id);
 }
 
 template <typename TSlot, SerializerDeserializer::Bytecode bytecode,

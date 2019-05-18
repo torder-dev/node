@@ -192,9 +192,9 @@ Handle<Code> BuildSetupFunction(Isolate* isolate,
 //
 // Finally, it is important that this function does not call `RecordWrite` which
 // is why "setup" is in charge of all allocations and we are using
-// SKIP_WRITE_BARRIER. The reason for this is that `RecordWrite` may clobber the
-// top 64 bits of Simd128 registers. This is the case on x64, ia32 and Arm64 for
-// example.
+// UNSAFE_SKIP_WRITE_BARRIER. The reason for this is that `RecordWrite` may
+// clobber the top 64 bits of Simd128 registers. This is the case on x64, ia32
+// and Arm64 for example.
 Handle<Code> BuildTeardownFunction(Isolate* isolate,
                                    CallDescriptor* call_descriptor,
                                    std::vector<AllocatedOperand> parameters) {
@@ -206,7 +206,8 @@ Handle<Code> BuildTeardownFunction(Isolate* isolate,
     Node* param = __ Parameter(i + 2);
     switch (parameters[i].representation()) {
       case MachineRepresentation::kTagged:
-        __ StoreFixedArrayElement(result_array, i, param, SKIP_WRITE_BARRIER);
+        __ StoreFixedArrayElement(result_array, i, param,
+                                  UNSAFE_SKIP_WRITE_BARRIER);
         break;
       // Box FP values into HeapNumbers.
       case MachineRepresentation::kFloat32:
@@ -229,7 +230,7 @@ Handle<Code> BuildTeardownFunction(Isolate* isolate,
                       ->I32x4ExtractLane(lane),
                   param));
           __ StoreFixedArrayElement(vector, lane, lane_value,
-                                    SKIP_WRITE_BARRIER);
+                                    UNSAFE_SKIP_WRITE_BARRIER);
         }
         break;
       }
@@ -272,7 +273,6 @@ void PrintStateValue(std::ostream& os, Isolate* isolate, Handle<Object> value,
     }
     default:
       UNREACHABLE();
-      break;
   }
   os << " (" << operand.representation() << " ";
   if (operand.location_kind() == AllocatedOperand::REGISTER) {
@@ -797,8 +797,8 @@ class TestEnvironment : public HandleAndZoneScope {
                         layout_[i]);
         std::ostringstream actual_str;
         PrintStateValue(actual_str, main_isolate(), actual_value, layout_[i]);
-        V8_Fatal(__FILE__, __LINE__, "Expected: '%s' but got '%s'",
-                 expected_str.str().c_str(), actual_str.str().c_str());
+        FATAL("Expected: '%s' but got '%s'", expected_str.str().c_str(),
+              actual_str.str().c_str());
       }
     }
   }

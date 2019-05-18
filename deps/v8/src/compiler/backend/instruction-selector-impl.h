@@ -33,7 +33,7 @@ class SwitchInfo {
              BasicBlock* default_branch)
       : cases_(cases),
         min_value_(min_value),
-        max_value_(min_value),
+        max_value_(max_value),
         default_branch_(default_branch) {
     if (cases.size() != 0) {
       DCHECK_LE(min_value, max_value);
@@ -335,6 +335,9 @@ class OperandGenerator {
           case MachineRepresentation::kTagged:
           case MachineRepresentation::kTaggedSigned:
           case MachineRepresentation::kTaggedPointer:
+          case MachineRepresentation::kCompressed:
+          case MachineRepresentation::kCompressedSigned:
+          case MachineRepresentation::kCompressedPointer:
             return Constant(static_cast<int32_t>(0));
           case MachineRepresentation::kFloat64:
             return Constant(static_cast<double>(0));

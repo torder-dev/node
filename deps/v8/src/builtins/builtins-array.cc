@@ -817,6 +817,10 @@ uint32_t EstimateElementCount(Isolate* isolate, Handle<JSArray> array) {
     case PACKED_SMI_ELEMENTS:
     case HOLEY_SMI_ELEMENTS:
     case PACKED_ELEMENTS:
+    case PACKED_FROZEN_ELEMENTS:
+    case PACKED_SEALED_ELEMENTS:
+    case HOLEY_FROZEN_ELEMENTS:
+    case HOLEY_SEALED_ELEMENTS:
     case HOLEY_ELEMENTS: {
       // Fast elements can't have lengths that are not representable by
       // a 32-bit signed integer.
@@ -881,7 +885,11 @@ void CollectElementIndices(Isolate* isolate, Handle<JSObject> object,
   switch (kind) {
     case PACKED_SMI_ELEMENTS:
     case PACKED_ELEMENTS:
+    case PACKED_FROZEN_ELEMENTS:
+    case PACKED_SEALED_ELEMENTS:
     case HOLEY_SMI_ELEMENTS:
+    case HOLEY_FROZEN_ELEMENTS:
+    case HOLEY_SEALED_ELEMENTS:
     case HOLEY_ELEMENTS: {
       DisallowHeapAllocation no_gc;
       FixedArray elements = FixedArray::cast(object->elements());
@@ -932,7 +940,9 @@ void CollectElementIndices(Isolate* isolate, Handle<JSObject> object,
       TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
       {
-        uint32_t length = static_cast<uint32_t>(object->elements()->length());
+        // TODO(bmeurer, v8:4153): Change this to size_t later.
+        uint32_t length =
+            static_cast<uint32_t>(Handle<JSTypedArray>::cast(object)->length());
         if (range <= length) {
           length = range;
           // We will add all indices, so we might as well clear it first
@@ -1050,7 +1060,11 @@ bool IterateElements(Isolate* isolate, Handle<JSReceiver> receiver,
   switch (array->GetElementsKind()) {
     case PACKED_SMI_ELEMENTS:
     case PACKED_ELEMENTS:
+    case PACKED_FROZEN_ELEMENTS:
+    case PACKED_SEALED_ELEMENTS:
     case HOLEY_SMI_ELEMENTS:
+    case HOLEY_FROZEN_ELEMENTS:
+    case HOLEY_SEALED_ELEMENTS:
     case HOLEY_ELEMENTS: {
       // Run through the elements FixedArray and use HasElement and GetElement
       // to check the prototype for missing elements.
@@ -1159,7 +1173,6 @@ bool IterateElements(Isolate* isolate, Handle<JSReceiver> receiver,
     case SLOW_STRING_WRAPPER_ELEMENTS:
       // |array| is guaranteed to be an array or typed array.
       UNREACHABLE();
-      break;
   }
   visitor->increase_index_offset(length);
   return true;
@@ -1205,6 +1218,9 @@ Object Slow_ArrayConcat(BuiltinArguments* args, Handle<Object> species,
       if (length_estimate != 0) {
         ElementsKind array_kind =
             GetPackedElementsKind(array->GetElementsKind());
+        if (IsFrozenOrSealedElementsKind(array_kind)) {
+          array_kind = PACKED_ELEMENTS;
+        }
         kind = GetMoreGeneralElementsKind(kind, array_kind);
       }
       element_estimate = EstimateElementCount(isolate, array);
@@ -1296,7 +1312,11 @@ Object Slow_ArrayConcat(BuiltinArguments* args, Handle<Object> species,
               break;
             }
             case HOLEY_ELEMENTS:
+            case HOLEY_FROZEN_ELEMENTS:
+            case HOLEY_SEALED_ELEMENTS:
             case PACKED_ELEMENTS:
+            case PACKED_FROZEN_ELEMENTS:
+            case PACKED_SEALED_ELEMENTS:
             case DICTIONARY_ELEMENTS:
             case NO_ELEMENTS:
               DCHECK_EQ(0u, length);

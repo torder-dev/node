@@ -98,6 +98,18 @@ void CPURegList::RemoveCalleeSaved() {
   }
 }
 
+void CPURegList::Align() {
+  // Use padreg, if necessary, to maintain stack alignment.
+  if (Count() % 2 != 0) {
+    if (IncludesAliasOf(padreg)) {
+      Remove(padreg);
+    } else {
+      Combine(padreg);
+    }
+  }
+
+  DCHECK_EQ(Count() % 2, 0);
+}
 
 CPURegList CPURegList::GetCalleeSaved(int size) {
   return CPURegList(CPURegister::kRegister, size, 19, 29);
@@ -280,7 +292,7 @@ bool AreConsecutive(const VRegister& reg1, const VRegister& reg2,
 
 void Immediate::InitializeHandle(Handle<HeapObject> handle) {
   value_ = static_cast<intptr_t>(handle.address());
-  rmode_ = RelocInfo::EMBEDDED_OBJECT;
+  rmode_ = RelocInfo::FULL_EMBEDDED_OBJECT;
 }
 
 
@@ -549,7 +561,6 @@ void Assembler::Reset() {
   memset(buffer_start_, 0, pc_ - buffer_start_);
 #endif
   pc_ = buffer_start_;
-  ReserveCodeTargetSpace(64);
   reloc_info_writer.Reposition(buffer_start_ + buffer_->size(), pc_);
   constpool_.Clear();
   next_constant_pool_check_ = 0;
@@ -563,8 +574,8 @@ void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
     switch (request.kind()) {
       case HeapObjectRequest::kHeapNumber: {
-        Handle<HeapObject> object =
-            isolate->factory()->NewHeapNumber(request.heap_number(), TENURED);
+        Handle<HeapObject> object = isolate->factory()->NewHeapNumber(
+            request.heap_number(), AllocationType::kOld);
         set_target_address_at(pc, 0 /* unused */, object.address());
         break;
       }
@@ -1698,14 +1709,14 @@ Operand Operand::EmbeddedNumber(double number) {
   if (DoubleToSmiInteger(number, &smi)) {
     return Operand(Immediate(Smi::FromInt(smi)));
   }
-  Operand result(0, RelocInfo::EMBEDDED_OBJECT);
+  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.heap_object_request_.emplace(number);
   DCHECK(result.IsHeapObjectRequest());
   return result;
 }
 
 Operand Operand::EmbeddedStringConstant(const StringConstantBase* str) {
-  Operand result(0, RelocInfo::EMBEDDED_OBJECT);
+  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.heap_object_request_.emplace(str);
   DCHECK(result.IsHeapObjectRequest());
   return result;

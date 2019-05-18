@@ -21,8 +21,6 @@
 #include "test/fuzzer/fuzzer-support.h"
 #include "test/fuzzer/wasm-fuzzer-common.h"
 
-typedef uint8_t byte;
-
 namespace v8 {
 namespace internal {
 namespace wasm {
@@ -71,7 +69,7 @@ class DataRange {
     // arbitrary expressions.
     const size_t num_bytes = std::min(max_bytes, data_.size());
     T result = T();
-    memcpy(&result, data_.start(), num_bytes);
+    memcpy(&result, data_.begin(), num_bytes);
     data_ += num_bytes;
     return result;
   }

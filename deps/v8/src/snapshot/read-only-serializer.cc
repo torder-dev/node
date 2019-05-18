@@ -4,10 +4,10 @@
 
 #include "src/snapshot/read-only-serializer.h"
 
-#include "src/api.h"
+#include "src/api/api.h"
 #include "src/code-tracer.h"
 #include "src/global-handles.h"
-#include "src/heap/heap-inl.h"  // For InReadOnlySpace.
+#include "src/heap/read-only-heap.h"
 #include "src/objects-inl.h"
 #include "src/objects/slots.h"
 #include "src/snapshot/startup-serializer.h"
@@ -26,7 +26,7 @@ ReadOnlySerializer::~ReadOnlySerializer() {
 }
 
 void ReadOnlySerializer::SerializeObject(HeapObject obj) {
-  CHECK(isolate()->heap()->InReadOnlySpace(obj));
+  CHECK(ReadOnlyHeap::Contains(obj));
   CHECK_IMPLIES(obj->IsString(), obj->IsInternalizedString());
 
   if (SerializeHotObject(obj)) return;
@@ -40,6 +40,9 @@ void ReadOnlySerializer::SerializeObject(HeapObject obj) {
   // Object has not yet been serialized.  Serialize it here.
   ObjectSerializer object_serializer(this, obj, &sink_);
   object_serializer.Serialize();
+#ifdef DEBUG
+  serialized_objects_.insert(obj);
+#endif
 }
 
 void ReadOnlySerializer::SerializeReadOnlyRoots() {
@@ -60,6 +63,16 @@ void ReadOnlySerializer::FinalizeSerialization() {
                    FullObjectSlot(&undefined));
   SerializeDeferredObjects();
   Pad();
+
+#ifdef DEBUG
+  // Check that every object on read-only heap is reachable (and was
+  // serialized).
+  ReadOnlyHeapIterator iterator(isolate()->heap()->read_only_heap());
+  for (HeapObject object = iterator.next(); !object.is_null();
+       object = iterator.next()) {
+    CHECK(serialized_objects_.count(object));
+  }
+#endif
 }
 
 bool ReadOnlySerializer::MustBeDeferred(HeapObject object) {
@@ -80,7 +93,7 @@ bool ReadOnlySerializer::MustBeDeferred(HeapObject object) {
 
 bool ReadOnlySerializer::SerializeUsingReadOnlyObjectCache(
     SnapshotByteSink* sink, HeapObject obj) {
-  if (!isolate()->heap()->InReadOnlySpace(obj)) return false;
+  if (!ReadOnlyHeap::Contains(obj)) return false;
 
   // Get the cache index and serialize it into the read-only snapshot if
   // necessary.

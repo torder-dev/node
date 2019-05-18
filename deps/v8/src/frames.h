@@ -249,7 +249,7 @@ class StackFrame {
   virtual Code unchecked_code() const = 0;
 
   // Search for the code associated with this frame.
-  Code LookupCode() const;
+  V8_EXPORT_PRIVATE Code LookupCode() const;
 
   virtual void Iterate(RootVisitor* v) const = 0;
   static void IteratePc(RootVisitor* v, Address* pc_address,
@@ -384,8 +384,6 @@ class ExitFrame: public StackFrame {
 
   Code unchecked_code() const override;
 
-  Address& code_slot() const;
-
   // Garbage collection support.
   void Iterate(RootVisitor* v) const override;
 
@@ -451,7 +449,7 @@ class BuiltinExitFrame : public ExitFrame {
 
 class StandardFrame;
 
-class FrameSummary {
+class V8_EXPORT_PRIVATE FrameSummary {
  public:
 // Subclasses for the different summary kinds:
 #define FRAME_SUMMARY_VARIANTS(F)                                             \
@@ -483,6 +481,9 @@ class FrameSummary {
                            JSFunction function, AbstractCode abstract_code,
                            int code_offset, bool is_constructor,
                            FixedArray parameters);
+
+    void EnsureSourcePositionsAvailable();
+    bool AreSourcePositionsAvailable() const;
 
     Handle<Object> receiver() const { return receiver_; }
     Handle<JSFunction> function() const { return function_; }
@@ -570,6 +571,9 @@ class FrameSummary {
   static FrameSummary GetBottom(const StandardFrame* frame);
   static FrameSummary GetSingle(const StandardFrame* frame);
   static FrameSummary Get(const StandardFrame* frame, int index);
+
+  void EnsureSourcePositionsAvailable();
+  bool AreSourcePositionsAvailable() const;
 
   // Dispatched accessors.
   Handle<Object> receiver() const;
@@ -1214,15 +1218,15 @@ class StackFrameIteratorBase {
 class StackFrameIterator: public StackFrameIteratorBase {
  public:
   // An iterator that iterates over the isolate's current thread's stack,
-  explicit StackFrameIterator(Isolate* isolate);
+  V8_EXPORT_PRIVATE explicit StackFrameIterator(Isolate* isolate);
   // An iterator that iterates over a given thread's stack.
-  StackFrameIterator(Isolate* isolate, ThreadLocalTop* t);
+  V8_EXPORT_PRIVATE StackFrameIterator(Isolate* isolate, ThreadLocalTop* t);
 
   StackFrame* frame() const {
     DCHECK(!done());
     return frame_;
   }
-  void Advance();
+  V8_EXPORT_PRIVATE void Advance();
 
  private:
   // Go back to the first frame.
@@ -1240,7 +1244,7 @@ class JavaScriptFrameIterator {
   inline JavaScriptFrame* frame() const;
 
   bool done() const { return iterator_.done(); }
-  void Advance();
+  V8_EXPORT_PRIVATE void Advance();
   void AdvanceOneFrame() { iterator_.Advance(); }
 
  private:
@@ -1250,7 +1254,7 @@ class JavaScriptFrameIterator {
 // NOTE: The stack trace frame iterator is an iterator that only traverse proper
 // JavaScript frames that have proper JavaScript functions and WebAssembly
 // frames.
-class StackTraceFrameIterator {
+class V8_EXPORT_PRIVATE StackTraceFrameIterator {
  public:
   explicit StackTraceFrameIterator(Isolate* isolate);
   // Skip frames until the frame with the given id is reached.
@@ -1270,12 +1274,10 @@ class StackTraceFrameIterator {
   bool IsValidFrame(StackFrame* frame) const;
 };
 
-
 class SafeStackFrameIterator: public StackFrameIteratorBase {
  public:
-  SafeStackFrameIterator(Isolate* isolate,
-                         Address fp, Address sp,
-                         Address js_entry_sp);
+  SafeStackFrameIterator(Isolate* isolate, Address pc, Address fp, Address sp,
+                         Address lr, Address js_entry_sp);
 
   inline StackFrame* frame() const;
   void Advance();
@@ -1293,10 +1295,19 @@ class SafeStackFrameIterator: public StackFrameIteratorBase {
   bool IsValidExitFrame(Address fp) const;
   bool IsValidTop(ThreadLocalTop* top) const;
 
+  // Returns true if the pc points to a bytecode handler and the frame pointer
+  // doesn't seem to be a bytecode handler's frame, which implies that the
+  // bytecode handler has an elided frame. This is not precise and might give
+  // false negatives since it relies on checks to the frame's type marker,
+  // which might be uninitialized.
+  bool IsNoFrameBytecodeHandlerPc(Isolate* isolate, Address pc,
+                                  Address fp) const;
+
   const Address low_bound_;
   const Address high_bound_;
   StackFrame::Type top_frame_type_;
   ExternalCallbackScope* external_callback_scope_;
+  Address top_link_register_;
 };
 }  // namespace internal
 }  // namespace v8

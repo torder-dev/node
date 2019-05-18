@@ -4,6 +4,8 @@
 
 #include "src/wasm/memory-tracing.h"
 
+#include <cinttypes>
+
 #include "src/utils.h"
 #include "src/v8memory.h"
 #include "src/vector.h"
@@ -35,21 +37,10 @@ void TraceMemoryOperation(ExecutionTier tier, const MemoryTracingInfo* info,
     default:
       SNPrintF(value, "???");
   }
-  const char* eng = "?";
-  switch (tier) {
-    case ExecutionTier::kOptimized:
-      eng = "turbofan";
-      break;
-    case ExecutionTier::kBaseline:
-      eng = "liftoff";
-      break;
-    case ExecutionTier::kInterpreter:
-      eng = "interpreter";
-      break;
-  }
+  const char* eng = ExecutionTierToString(tier);
   printf("%-11s func:%6d+0x%-6x%s %08x val: %s\n", eng, func_index, position,
          info->is_store ? " store to" : "load from", info->address,
-         value.start());
+         value.begin());
 }
 
 }  // namespace wasm

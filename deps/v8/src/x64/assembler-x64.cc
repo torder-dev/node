@@ -327,8 +327,8 @@ void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
     switch (request.kind()) {
       case HeapObjectRequest::kHeapNumber: {
-        Handle<HeapNumber> object =
-            isolate->factory()->NewHeapNumber(request.heap_number(), TENURED);
+        Handle<HeapNumber> object = isolate->factory()->NewHeapNumber(
+            request.heap_number(), AllocationType::kOld);
         WriteUnalignedValue(pc, object);
         break;
       }
@@ -428,11 +428,16 @@ bool Assembler::UseConstPoolFor(RelocInfo::Mode rmode) {
 Assembler::Assembler(const AssemblerOptions& options,
                      std::unique_ptr<AssemblerBuffer> buffer)
     : AssemblerBase(options, std::move(buffer)), constpool_(this) {
-  ReserveCodeTargetSpace(100);
   reloc_info_writer.Reposition(buffer_start_ + buffer_->size(), pc_);
   if (CpuFeatures::IsSupported(SSE4_1)) {
     EnableCpuFeature(SSSE3);
   }
+
+#if defined(V8_OS_WIN_X64)
+  if (options.collect_win64_unwind_info) {
+    xdata_encoder_ = std::make_unique<win64_unwindinfo::XdataEncoder>(*this);
+  }
+#endif
 }
 
 void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
@@ -495,6 +500,14 @@ void Assembler::FinalizeJumpOptimizationInfo() {
     }
   }
 }
+
+#if defined(V8_OS_WIN_X64)
+win64_unwindinfo::BuiltinUnwindInfo Assembler::GetUnwindInfo() const {
+  DCHECK(options().collect_win64_unwind_info);
+  DCHECK_NOT_NULL(xdata_encoder_);
+  return xdata_encoder_->unwinding_info();
+}
+#endif
 
 void Assembler::Align(int m) {
   DCHECK(base::bits::IsPowerOfTwo(m));
@@ -1110,22 +1123,20 @@ void Assembler::call(Handle<Code> target, RelocInfo::Mode rmode) {
   emitl(code_target_index);
 }
 
-void Assembler::near_call(Address addr, RelocInfo::Mode rmode) {
+void Assembler::near_call(intptr_t disp, RelocInfo::Mode rmode) {
   EnsureSpace ensure_space(this);
   emit(0xE8);
-  intptr_t value = static_cast<intptr_t>(addr);
-  DCHECK(is_int32(value));
+  DCHECK(is_int32(disp));
   RecordRelocInfo(rmode);
-  emitl(static_cast<int32_t>(value));
+  emitl(static_cast<int32_t>(disp));
 }
 
-void Assembler::near_jmp(Address addr, RelocInfo::Mode rmode) {
+void Assembler::near_jmp(intptr_t disp, RelocInfo::Mode rmode) {
   EnsureSpace ensure_space(this);
   emit(0xE9);
-  intptr_t value = static_cast<intptr_t>(addr);
-  DCHECK(is_int32(value));
-  RecordRelocInfo(rmode);
-  emitl(static_cast<int32_t>(value));
+  DCHECK(is_int32(disp));
+  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode);
+  emitl(static_cast<int32_t>(disp));
 }
 
 void Assembler::call(Register adr) {
@@ -1555,24 +1566,34 @@ void Assembler::j(Condition cc,
   emitl(code_target_index);
 }
 
-
-void Assembler::jmp(Label* L, Label::Distance distance) {
+void Assembler::jmp_rel(int offset) {
   EnsureSpace ensure_space(this);
   const int short_size = sizeof(int8_t);
   const int long_size = sizeof(int32_t);
+  --offset;  // This is how jumps are specified on x64.
+  if (is_int8(offset - short_size) && !predictable_code_size()) {
+    // 1110 1011 #8-bit disp.
+    emit(0xEB);
+    emit((offset - short_size) & 0xFF);
+  } else {
+    // 1110 1001 #32-bit disp.
+    emit(0xE9);
+    emitl(offset - long_size);
+  }
+}
+
+void Assembler::jmp(Label* L, Label::Distance distance) {
+  const int long_size = sizeof(int32_t);
+
   if (L->is_bound()) {
-    int offs = L->pos() - pc_offset() - 1;
-    DCHECK_LE(offs, 0);
-    if (is_int8(offs - short_size) && !predictable_code_size()) {
-      // 1110 1011 #8-bit disp.
-      emit(0xEB);
-      emit((offs - short_size) & 0xFF);
-    } else {
-      // 1110 1001 #32-bit disp.
-      emit(0xE9);
-      emitl(offs - long_size);
-    }
-  } else if (distance == Label::kNear) {
+    int offset = L->pos() - pc_offset();
+    DCHECK_LE(offset, 0);  // backward jump.
+    jmp_rel(offset);
+    return;
+  }
+
+  EnsureSpace ensure_space(this);
+  if (distance == Label::kNear) {
     emit(0xEB);
     byte disp = 0x00;
     if (L->is_near_linked()) {
@@ -1610,7 +1631,6 @@ void Assembler::jmp(Label* L, Label::Distance distance) {
     }
   }
 }
-
 
 void Assembler::jmp(Handle<Code> target, RelocInfo::Mode rmode) {
   DCHECK(RelocInfo::IsCodeTarget(rmode));
@@ -1750,6 +1770,12 @@ void Assembler::emit_mov(Register dst, Register src, int size) {
     emit(0x8B);
     emit_modrm(dst, src);
   }
+
+#if defined(V8_OS_WIN_X64)
+  if (xdata_encoder_ && dst == rbp && src == rsp) {
+    xdata_encoder_->onMovRbpRsp();
+  }
+#endif
 }
 
 void Assembler::emit_mov(Operand dst, Register src, int size) {
@@ -1801,7 +1827,7 @@ void Assembler::movq_heap_number(Register dst, double value) {
   emit_rex(dst, kInt64Size);
   emit(0xB8 | dst.low_bits());
   RequestHeapObject(HeapObjectRequest(value));
-  emit(Immediate64(kNullAddress, RelocInfo::EMBEDDED_OBJECT));
+  emit(Immediate64(kNullAddress, RelocInfo::FULL_EMBEDDED_OBJECT));
 }
 
 void Assembler::movq_string(Register dst, const StringConstantBase* str) {
@@ -1809,7 +1835,7 @@ void Assembler::movq_string(Register dst, const StringConstantBase* str) {
   emit_rex(dst, kInt64Size);
   emit(0xB8 | dst.low_bits());
   RequestHeapObject(HeapObjectRequest(str));
-  emit(Immediate64(kNullAddress, RelocInfo::EMBEDDED_OBJECT));
+  emit(Immediate64(kNullAddress, RelocInfo::FULL_EMBEDDED_OBJECT));
 }
 
 // Loads the ip-relative location of the src label into the target location
@@ -2154,6 +2180,12 @@ void Assembler::pushq(Register src) {
   EnsureSpace ensure_space(this);
   emit_optional_rex_32(src);
   emit(0x50 | src.low_bits());
+
+#if defined(V8_OS_WIN_X64)
+  if (xdata_encoder_ && src == rbp) {
+    xdata_encoder_->onPushRbp();
+  }
+#endif
 }
 
 void Assembler::pushq(Operand src) {
@@ -2829,6 +2861,21 @@ void Assembler::andps(XMMRegister dst, Operand src) {
   emit_sse_operand(dst, src);
 }
 
+void Assembler::andnps(XMMRegister dst, XMMRegister src) {
+  EnsureSpace ensure_space(this);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x55);
+  emit_sse_operand(dst, src);
+}
+
+void Assembler::andnps(XMMRegister dst, Operand src) {
+  EnsureSpace ensure_space(this);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x55);
+  emit_sse_operand(dst, src);
+}
 
 void Assembler::orps(XMMRegister dst, XMMRegister src) {
   EnsureSpace ensure_space(this);
@@ -3206,6 +3253,19 @@ void Assembler::pinsrb(XMMRegister dst, Operand src, int8_t imm8) {
 }
 
 void Assembler::insertps(XMMRegister dst, XMMRegister src, byte imm8) {
+  DCHECK(CpuFeatures::IsSupported(SSE4_1));
+  DCHECK(is_uint8(imm8));
+  EnsureSpace ensure_space(this);
+  emit(0x66);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x3A);
+  emit(0x21);
+  emit_sse_operand(dst, src);
+  emit(imm8);
+}
+
+void Assembler::insertps(XMMRegister dst, Operand src, byte imm8) {
   DCHECK(CpuFeatures::IsSupported(SSE4_1));
   DCHECK(is_uint8(imm8));
   EnsureSpace ensure_space(this);

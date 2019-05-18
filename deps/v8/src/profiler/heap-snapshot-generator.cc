@@ -6,12 +6,13 @@
 
 #include <utility>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/assembler-inl.h"
-#include "src/conversions.h"
 #include "src/debug/debug.h"
 #include "src/global-handles.h"
+#include "src/heap/combined-heap.h"
 #include "src/layout-descriptor.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-body-descriptors.h"
 #include "src/objects-inl.h"
 #include "src/objects/allocation-site-inl.h"
@@ -103,7 +104,7 @@ void HeapEntry::SetNamedAutoIndexReference(HeapGraphEdge::Type type,
 void HeapEntry::Print(
     const char* prefix, const char* edge_name, int max_depth, int indent) {
   STATIC_ASSERT(sizeof(unsigned) == sizeof(id()));
-  base::OS::Print("%6" PRIuS " @%6u %*c %s%s: ", self_size(), id(), indent, ' ',
+  base::OS::Print("%6zu @%6u %*c %s%s: ", self_size(), id(), indent, ' ',
                   prefix, edge_name);
   if (type() != kString) {
     base::OS::Print("%s %.40s\n", TypeAsString(), name_);
@@ -124,7 +125,7 @@ void HeapEntry::Print(
     HeapGraphEdge& edge = **i;
     const char* edge_prefix = "";
     EmbeddedVector<char, 64> index;
-    const char* edge_name = index.start();
+    const char* edge_name = index.begin();
     switch (edge.type()) {
       case HeapGraphEdge::kContextVariable:
         edge_prefix = "#";
@@ -394,7 +395,7 @@ void HeapObjectsMap::UpdateHeapObjectsMap() {
   }
   heap_->PreciseCollectAllGarbage(Heap::kNoGCFlags,
                                   GarbageCollectionReason::kHeapProfiler);
-  HeapIterator iterator(heap_);
+  CombinedHeapIterator iterator(heap_);
   for (HeapObject obj = iterator.next(); !obj.is_null();
        obj = iterator.next()) {
     FindOrAddEntry(obj->address(), obj->Size());
@@ -645,7 +646,7 @@ const char* V8HeapExplorer::GetSystemEntryName(HeapObject object) {
 }
 
 int V8HeapExplorer::EstimateObjectsCount() {
-  HeapIterator it(heap_, HeapIterator::kFilterUnreachable);
+  CombinedHeapIterator it(heap_, HeapIterator::kFilterUnreachable);
   int objects_count = 0;
   while (!it.next().is_null()) ++objects_count;
   return objects_count;
@@ -657,9 +658,8 @@ class IndexedReferencesExtractor : public ObjectVisitor {
                              HeapEntry* parent)
       : generator_(generator),
         parent_obj_(parent_obj),
-        parent_start_(HeapObject::RawMaybeWeakField(parent_obj_, 0)),
-        parent_end_(
-            HeapObject::RawMaybeWeakField(parent_obj_, parent_obj_->Size())),
+        parent_start_(parent_obj_.RawMaybeWeakField(0)),
+        parent_end_(parent_obj_.RawMaybeWeakField(parent_obj_->Size())),
         parent_(parent),
         next_index_(0) {}
   void VisitPointers(HeapObject host, ObjectSlot start,
@@ -1025,7 +1025,7 @@ void V8HeapExplorer::ExtractMapReferences(HeapEntry* entry, Map map) {
   DescriptorArray descriptors = map->instance_descriptors();
   TagObject(descriptors, "(map descriptors)");
   SetInternalReference(entry, "descriptors", descriptors,
-                       Map::kDescriptorsOffset);
+                       Map::kInstanceDescriptorsOffset);
   SetInternalReference(entry, "prototype", map->prototype(),
                        Map::kPrototypeOffset);
   if (FLAG_unbox_double_fields) {
@@ -1233,7 +1233,7 @@ void V8HeapExplorer::ExtractFeedbackVectorReferences(
   HeapObject code_heap_object;
   if (code->GetHeapObjectIfWeak(&code_heap_object)) {
     SetWeakReference(entry, "optimized code", code_heap_object,
-                     FeedbackVector::kOptimizedCodeOffset);
+                     FeedbackVector::kOptimizedCodeWeakOrSmiOffset);
   }
 }
 
@@ -1457,7 +1457,7 @@ bool V8HeapExplorer::IterateAndExtractReferences(
 
   bool interrupted = false;
 
-  HeapIterator iterator(heap_, HeapIterator::kFilterUnreachable);
+  CombinedHeapIterator iterator(heap_, HeapIterator::kFilterUnreachable);
   // Heap iteration with filtering must be finished in any case.
   for (HeapObject obj = iterator.next(); !obj.is_null();
        obj = iterator.next(), progress_->ProgressStep()) {
@@ -1682,6 +1682,10 @@ void V8HeapExplorer::SetGcSubrootReference(Root root, const char* description,
         edge_type, description, child_entry, names_);
   }
 
+  // For full heap snapshots we do not emit user roots but rather rely on
+  // regular GC roots to retain objects.
+  if (FLAG_raw_heap_snapshots) return;
+
   // Add a shortcut to JS global object reference at snapshot root.
   // That allows the user to easily find global objects. They are
   // also used as starting points in distance calculations.
@@ -1838,7 +1842,7 @@ const char* EmbedderGraphNodeName(StringsStorage* names,
 }
 
 HeapEntry::Type EmbedderGraphNodeType(EmbedderGraphImpl::Node* node) {
-  return HeapEntry::kNative;
+  return node->IsRootNode() ? HeapEntry::kSynthetic : HeapEntry::kNative;
 }
 
 // Merges the names of an embedder node and its wrapper node.
@@ -1929,7 +1933,8 @@ bool NativeObjectsExplorer::IterateAndExtractReferences(
       if (edge.name == nullptr) {
         from->SetIndexedAutoIndexReference(HeapGraphEdge::kElement, to);
       } else {
-        from->SetNamedReference(HeapGraphEdge::kInternal, edge.name, to);
+        from->SetNamedReference(HeapGraphEdge::kInternal,
+                                names_->GetCopy(edge.name), to);
       }
     }
   }
@@ -2063,17 +2068,19 @@ class OutputStreamWriter {
     MaybeWriteChunk();
   }
   void AddString(const char* s) {
-    AddSubstring(s, StrLength(s));
+    size_t len = strlen(s);
+    DCHECK_GE(kMaxInt, len);
+    AddSubstring(s, static_cast<int>(len));
   }
   void AddSubstring(const char* s, int n) {
     if (n <= 0) return;
-    DCHECK(static_cast<size_t>(n) <= strlen(s));
+    DCHECK_LE(n, strlen(s));
     const char* s_end = s + n;
     while (s < s_end) {
       int s_chunk_size =
           Min(chunk_size_ - chunk_pos_, static_cast<int>(s_end - s));
       DCHECK_GT(s_chunk_size, 0);
-      MemCopy(chunk_.start() + chunk_pos_, s, s_chunk_size);
+      MemCopy(chunk_.begin() + chunk_pos_, s, s_chunk_size);
       s += s_chunk_size;
       chunk_pos_ += s_chunk_size;
       MaybeWriteChunk();
@@ -2106,7 +2113,7 @@ class OutputStreamWriter {
       int result = SNPrintF(buffer, format, n);
       USE(result);
       DCHECK_NE(result, -1);
-      AddString(buffer.start());
+      AddString(buffer.begin());
     }
   }
   void MaybeWriteChunk() {
@@ -2117,8 +2124,9 @@ class OutputStreamWriter {
   }
   void WriteChunk() {
     if (aborted_) return;
-    if (stream_->WriteAsciiChunk(chunk_.start(), chunk_pos_) ==
-        v8::OutputStream::kAbort) aborted_ = true;
+    if (stream_->WriteAsciiChunk(chunk_.begin(), chunk_pos_) ==
+        v8::OutputStream::kAbort)
+      aborted_ = true;
     chunk_pos_ = 0;
   }
 
@@ -2265,7 +2273,7 @@ void HeapSnapshotJSONSerializer::SerializeEdge(HeapGraphEdge* edge,
   buffer_pos = utoa(to_node_index(edge->to()), buffer, buffer_pos);
   buffer[buffer_pos++] = '\n';
   buffer[buffer_pos++] = '\0';
-  writer_->AddString(buffer.start());
+  writer_->AddString(buffer.begin());
 }
 
 void HeapSnapshotJSONSerializer::SerializeEdges() {
@@ -2302,7 +2310,7 @@ void HeapSnapshotJSONSerializer::SerializeNode(const HeapEntry* entry) {
   buffer_pos = utoa(entry->trace_node_id(), buffer, buffer_pos);
   buffer[buffer_pos++] = '\n';
   buffer[buffer_pos++] = '\0';
-  writer_->AddString(buffer.start());
+  writer_->AddString(buffer.begin());
 }
 
 void HeapSnapshotJSONSerializer::SerializeNodes() {
@@ -2441,7 +2449,7 @@ void HeapSnapshotJSONSerializer::SerializeTraceNode(AllocationTraceNode* node) {
   buffer[buffer_pos++] = ',';
   buffer[buffer_pos++] = '[';
   buffer[buffer_pos++] = '\0';
-  writer_->AddString(buffer.start());
+  writer_->AddString(buffer.begin());
 
   int i = 0;
   for (AllocationTraceNode* child : node->children()) {
@@ -2496,7 +2504,7 @@ void HeapSnapshotJSONSerializer::SerializeTraceNodeInfos() {
     buffer_pos = SerializePosition(info->column, buffer, buffer_pos);
     buffer[buffer_pos++] = '\n';
     buffer[buffer_pos++] = '\0';
-    writer_->AddString(buffer.start());
+    writer_->AddString(buffer.begin());
   }
 }
 
@@ -2524,7 +2532,7 @@ void HeapSnapshotJSONSerializer::SerializeSamples() {
     buffer_pos = utoa(sample.last_assigned_id(), buffer, buffer_pos);
     buffer[buffer_pos++] = '\n';
     buffer[buffer_pos++] = '\0';
-    writer_->AddString(buffer.start());
+    writer_->AddString(buffer.begin());
   }
 }
 
@@ -2611,7 +2619,7 @@ void HeapSnapshotJSONSerializer::SerializeLocation(
   buffer_pos = utoa(location.col, buffer, buffer_pos);
   buffer[buffer_pos++] = '\n';
   buffer[buffer_pos++] = '\0';
-  writer_->AddString(buffer.start());
+  writer_->AddString(buffer.begin());
 }
 
 void HeapSnapshotJSONSerializer::SerializeLocations() {

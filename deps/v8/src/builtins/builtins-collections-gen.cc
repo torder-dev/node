@@ -12,8 +12,9 @@
 #include "src/heap/heap-inl.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/js-collection.h"
-#include "torque-generated/builtins-base-from-dsl-gen.h"
-#include "torque-generated/builtins-collections-from-dsl-gen.h"
+#include "src/objects/ordered-hash-table.h"
+#include "torque-generated/builtins-base-gen-tq.h"
+#include "torque-generated/builtins-collections-gen-tq.h"
 
 namespace v8 {
 namespace internal {
@@ -24,11 +25,13 @@ using TNode = compiler::TNode<T>;
 template <class T>
 using TVariable = compiler::TypedCodeAssemblerVariable<T>;
 
-class BaseCollectionsAssembler : public CodeStubAssembler,
-                                 public CollectionsBuiltinsFromDSLAssembler {
+class BaseCollectionsAssembler
+    : public CodeStubAssembler,
+      public TorqueGeneratedCollectionsBuiltinsAssembler {
  public:
   explicit BaseCollectionsAssembler(compiler::CodeAssemblerState* state)
-      : CodeStubAssembler(state), CollectionsBuiltinsFromDSLAssembler(state) {}
+      : CodeStubAssembler(state),
+        TorqueGeneratedCollectionsBuiltinsAssembler(state) {}
 
   virtual ~BaseCollectionsAssembler() = default;
 
@@ -157,7 +160,7 @@ void BaseCollectionsAssembler::AddConstructorEntry(
                                                         var_exception);
   CSA_ASSERT(this, Word32BinaryNot(IsTheHole(key_value)));
   if (variant == kMap || variant == kWeakMap) {
-    BaseBuiltinsFromDSLAssembler::KeyValuePair pair =
+    TorqueGeneratedBaseBuiltinsAssembler::KeyValuePair pair =
         if_may_have_side_effects != nullptr
             ? LoadKeyValuePairNoSideEffects(context, key_value,
                                             if_may_have_side_effects)
@@ -759,8 +762,9 @@ Node* CollectionsBuiltinsAssembler::CallGetOrCreateHashRaw(Node* const key) {
   MachineType type_ptr = MachineType::Pointer();
   MachineType type_tagged = MachineType::AnyTagged();
 
-  Node* const result = CallCFunction2(type_tagged, type_ptr, type_tagged,
-                                      function_addr, isolate_ptr, key);
+  Node* const result = CallCFunction(function_addr, type_tagged,
+                                     std::make_pair(type_ptr, isolate_ptr),
+                                     std::make_pair(type_tagged, key));
 
   return result;
 }
@@ -774,8 +778,10 @@ Node* CollectionsBuiltinsAssembler::CallGetHashRaw(Node* const key) {
   MachineType type_ptr = MachineType::Pointer();
   MachineType type_tagged = MachineType::AnyTagged();
 
-  Node* const result = CallCFunction2(type_tagged, type_ptr, type_tagged,
-                                      function_addr, isolate_ptr, key);
+  Node* const result = CallCFunction(function_addr, type_tagged,
+                                     std::make_pair(type_ptr, isolate_ptr),
+                                     std::make_pair(type_tagged, key));
+
   return SmiUntag(result);
 }
 
@@ -1572,8 +1578,8 @@ void CollectionsBuiltinsAssembler::StoreOrderedHashMapNewEntry(
     Node* const hash, Node* const number_of_buckets, Node* const occupancy) {
   Node* const bucket =
       WordAnd(hash, IntPtrSub(number_of_buckets, IntPtrConstant(1)));
-  Node* const bucket_entry = UnsafeLoadFixedArrayElement(
-      table, bucket, OrderedHashMap::HashTableStartIndex() * kTaggedSize);
+  TNode<Smi> bucket_entry = CAST(UnsafeLoadFixedArrayElement(
+      table, bucket, OrderedHashMap::HashTableStartIndex() * kTaggedSize));
 
   // Store the entry elements.
   Node* const entry_start = IntPtrAdd(
@@ -1746,8 +1752,8 @@ void CollectionsBuiltinsAssembler::StoreOrderedHashSetNewEntry(
     Node* const number_of_buckets, Node* const occupancy) {
   Node* const bucket =
       WordAnd(hash, IntPtrSub(number_of_buckets, IntPtrConstant(1)));
-  Node* const bucket_entry = UnsafeLoadFixedArrayElement(
-      table, bucket, OrderedHashSet::HashTableStartIndex() * kTaggedSize);
+  TNode<Smi> bucket_entry = CAST(UnsafeLoadFixedArrayElement(
+      table, bucket, OrderedHashSet::HashTableStartIndex() * kTaggedSize));
 
   // Store the entry elements.
   Node* const entry_start = IntPtrAdd(
@@ -2341,7 +2347,8 @@ void WeakCollectionsBuiltinsAssembler::AddEntry(
     TNode<Object> key, TNode<Object> value, TNode<IntPtrT> number_of_elements) {
   // See EphemeronHashTable::AddEntry().
   TNode<IntPtrT> value_index = ValueIndexFromKeyIndex(key_index);
-  UnsafeStoreFixedArrayElement(table, key_index, key);
+  UnsafeStoreFixedArrayElement(table, key_index, key,
+                               UPDATE_EPHEMERON_KEY_WRITE_BARRIER);
   UnsafeStoreFixedArrayElement(table, value_index, value);
 
   // See HashTableBase::ElementAdded().
@@ -2389,8 +2396,9 @@ TNode<Smi> WeakCollectionsBuiltinsAssembler::CreateIdentityHash(
   MachineType type_ptr = MachineType::Pointer();
   MachineType type_tagged = MachineType::AnyTagged();
 
-  return CAST(CallCFunction2(type_tagged, type_ptr, type_tagged, function_addr,
-                             isolate_ptr, key));
+  return CAST(CallCFunction(function_addr, type_tagged,
+                            std::make_pair(type_ptr, isolate_ptr),
+                            std::make_pair(type_tagged, key)));
 }
 
 TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::EntryMask(
@@ -2611,7 +2619,7 @@ TF_BUILTIN(WeakMapGet, WeakCollectionsBuiltinsAssembler) {
   Return(UndefinedConstant());
 }
 
-TF_BUILTIN(WeakMapHas, WeakCollectionsBuiltinsAssembler) {
+TF_BUILTIN(WeakMapPrototypeHas, WeakCollectionsBuiltinsAssembler) {
   Node* const receiver = Parameter(Descriptor::kReceiver);
   Node* const key = Parameter(Descriptor::kKey);
   Node* const context = Parameter(Descriptor::kContext);
@@ -2775,7 +2783,7 @@ TF_BUILTIN(WeakSetPrototypeDelete, CodeStubAssembler) {
       CallBuiltin(Builtins::kWeakCollectionDelete, context, receiver, value));
 }
 
-TF_BUILTIN(WeakSetHas, WeakCollectionsBuiltinsAssembler) {
+TF_BUILTIN(WeakSetPrototypeHas, WeakCollectionsBuiltinsAssembler) {
   Node* const receiver = Parameter(Descriptor::kReceiver);
   Node* const key = Parameter(Descriptor::kKey);
   Node* const context = Parameter(Descriptor::kContext);

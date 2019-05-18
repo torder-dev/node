@@ -4,13 +4,14 @@
 
 #include "src/json-stringifier.h"
 
-#include "src/conversions.h"
 #include "src/lookup.h"
 #include "src/message-template.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/oddball-inl.h"
+#include "src/objects/ordered-hash-table.h"
 #include "src/objects/smi.h"
 #include "src/string-builder-inl.h"
 #include "src/utils.h"
@@ -321,21 +322,13 @@ MaybeHandle<Object> JsonStringifier::ApplyToJsonFunction(Handle<Object> object,
                                                          Handle<Object> key) {
   HandleScope scope(isolate_);
 
-  Handle<Object> object_for_lookup = object;
-  if (object->IsBigInt()) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate_, object_for_lookup,
-                               Object::ToObject(isolate_, object), Object);
-  }
-  DCHECK(object_for_lookup->IsJSReceiver());
-
-  // Retrieve toJSON function.
+  // Retrieve toJSON function. The LookupIterator automatically handles
+  // the ToObject() equivalent ("GetRoot") if {object} is a BigInt.
   Handle<Object> fun;
-  {
-    LookupIterator it(isolate_, object_for_lookup, tojson_string_,
-                      LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
-    ASSIGN_RETURN_ON_EXCEPTION(isolate_, fun, Object::GetProperty(&it), Object);
-    if (!fun->IsCallable()) return object;
-  }
+  LookupIterator it(isolate_, object, tojson_string_,
+                    LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate_, fun, Object::GetProperty(&it), Object);
+  if (!fun->IsCallable()) return object;
 
   // Call toJSON function.
   if (key->IsSmi()) key = factory()->NumberToString(key);
@@ -760,7 +753,10 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
 
   if (property_list_.is_null() &&
       !object->map()->IsCustomElementsReceiverMap() &&
-      object->HasFastProperties() && object->elements()->length() == 0) {
+      object->HasFastProperties() &&
+      (object->elements() == ReadOnlyRoots(isolate_).empty_fixed_array() ||
+       object->elements() ==
+           ReadOnlyRoots(isolate_).empty_slow_element_dictionary())) {
     DCHECK(!object->IsJSGlobalProxy());
     DCHECK(!object->HasIndexedInterceptor());
     DCHECK(!object->HasNamedInterceptor());
@@ -879,7 +875,7 @@ void JsonStringifier::SerializeStringUnchecked_(
     SrcChar c = src[i];
     if (DoNotEscape(c)) {
       dest->Append(c);
-    } else if (FLAG_harmony_json_stringify && c >= 0xD800 && c <= 0xDFFF) {
+    } else if (c >= 0xD800 && c <= 0xDFFF) {
       // The current character is a surrogate.
       if (c <= 0xDBFF) {
         // The current character is a leading surrogate.
@@ -942,7 +938,7 @@ void JsonStringifier::SerializeString_(Handle<String> string) {
       SrcChar c = reader.Get<SrcChar>(i);
       if (DoNotEscape(c)) {
         builder_.Append<SrcChar, DestChar>(c);
-      } else if (FLAG_harmony_json_stringify && c >= 0xD800 && c <= 0xDFFF) {
+      } else if (c >= 0xD800 && c <= 0xDFFF) {
         // The current character is a surrogate.
         if (c <= 0xDBFF) {
           // The current character is a leading surrogate.
@@ -998,8 +994,7 @@ bool JsonStringifier::DoNotEscape(uint8_t c) {
 template <>
 bool JsonStringifier::DoNotEscape(uint16_t c) {
   // https://tc39.github.io/ecma262/#table-json-single-character-escapes
-  return c >= 0x23 && c != 0x5C && c != 0x7F &&
-         (!FLAG_harmony_json_stringify || (c < 0xD800 || c > 0xDFFF));
+  return c >= 0x23 && c != 0x5C && c != 0x7F && (c < 0xD800 || c > 0xDFFF);
 }
 
 void JsonStringifier::NewLine() {

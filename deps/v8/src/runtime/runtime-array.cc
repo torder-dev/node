@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 #include "src/arguments-inl.h"
-#include "src/conversions-inl.h"
 #include "src/counters.h"
 #include "src/debug/debug.h"
 #include "src/elements.h"
@@ -12,6 +11,7 @@
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/isolate-inl.h"
 #include "src/keys.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/hash-table-inl.h"
@@ -80,7 +80,7 @@ Object RemoveArrayHolesGeneric(Isolate* isolate, Handle<JSReceiver> receiver,
 
   uint32_t num_undefined = 0;
   uint32_t current_pos = 0;
-  int num_indices = keys.is_null() ? limit : keys->length();
+  uint32_t num_indices = keys.is_null() ? limit : keys->length();
 
   // Compact keys with undefined values and moves non-undefined
   // values to the front.
@@ -91,7 +91,7 @@ Object RemoveArrayHolesGeneric(Isolate* isolate, Handle<JSReceiver> receiver,
   //       is used to track free spots in the array starting at the beginning.
   //       Holes and 'undefined' are considered free spots.
   //       A hole is when HasElement(receiver, key) is false.
-  for (int i = 0; i < num_indices; ++i) {
+  for (uint32_t i = 0; i < num_indices; ++i) {
     uint32_t key = keys.is_null() ? i : NumberToUint32(keys->get(i));
 
     // We only care about array indices that are smaller than the limit.
@@ -163,7 +163,8 @@ Object RemoveArrayHolesGeneric(Isolate* isolate, Handle<JSReceiver> receiver,
   // DCHECK_LE(current_pos, num_indices);
 
   // Deleting everything after the undefineds up unto the limit.
-  for (int i = num_indices - 1; i >= 0; --i) {
+  for (uint32_t i = num_indices; i > 0;) {
+    --i;
     uint32_t key = keys.is_null() ? i : NumberToUint32(keys->get(i));
     if (key < current_pos) break;
     if (key >= limit) continue;
@@ -210,18 +211,21 @@ Object RemoveArrayHoles(Isolate* isolate, Handle<JSReceiver> receiver,
     Handle<Map> new_map =
         JSObject::GetElementsTransitionMap(object, HOLEY_ELEMENTS);
 
-    PretenureFlag tenure =
-        ObjectInYoungGeneration(*object) ? NOT_TENURED : TENURED;
+    AllocationType allocation = ObjectInYoungGeneration(*object)
+                                    ? AllocationType::kYoung
+                                    : AllocationType::kOld;
     Handle<FixedArray> fast_elements =
-        isolate->factory()->NewFixedArray(dict->NumberOfElements(), tenure);
+        isolate->factory()->NewFixedArray(dict->NumberOfElements(), allocation);
     dict->CopyValuesTo(*fast_elements);
 
     JSObject::SetMapAndElements(object, new_map, fast_elements);
     JSObject::ValidateElements(*object);
   } else if (object->HasFixedTypedArrayElements()) {
     // Typed arrays cannot have holes or undefined elements.
-    int array_length = FixedArrayBase::cast(object->elements())->length();
-    return Smi::FromInt(Min(limit, static_cast<uint32_t>(array_length)));
+    // TODO(bmeurer, v8:4153): Change this to size_t later.
+    uint32_t array_length =
+        static_cast<uint32_t>(Handle<JSTypedArray>::cast(receiver)->length());
+    return Smi::FromInt(Min(limit, array_length));
   } else if (!object->HasDoubleElements()) {
     JSObject::EnsureWritableFastElements(object);
   }
@@ -418,96 +422,6 @@ RUNTIME_FUNCTION(Runtime_PrepareElementsForSort) {
   return RemoveArrayHoles(isolate, object, length);
 }
 
-// How many elements does this object/array have?
-RUNTIME_FUNCTION(Runtime_EstimateNumberOfElements) {
-  DisallowHeapAllocation no_gc;
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_CHECKED(JSArray, array, 0);
-  FixedArrayBase elements = array->elements();
-  SealHandleScope shs(isolate);
-  if (elements->IsNumberDictionary()) {
-    int result = NumberDictionary::cast(elements)->NumberOfElements();
-    return Smi::FromInt(result);
-  } else {
-    DCHECK(array->length()->IsSmi());
-    // For packed elements, we know the exact number of elements
-    int length = elements->length();
-    ElementsKind kind = array->GetElementsKind();
-    if (IsFastPackedElementsKind(kind)) {
-      return Smi::FromInt(length);
-    }
-    // For holey elements, take samples from the buffer checking for holes
-    // to generate the estimate.
-    const int kNumberOfHoleCheckSamples = 97;
-    int increment = (length < kNumberOfHoleCheckSamples)
-                        ? 1
-                        : static_cast<int>(length / kNumberOfHoleCheckSamples);
-    ElementsAccessor* accessor = array->GetElementsAccessor();
-    int holes = 0;
-    for (int i = 0; i < length; i += increment) {
-      if (!accessor->HasElement(array, i, elements)) {
-        ++holes;
-      }
-    }
-    int estimate = static_cast<int>((kNumberOfHoleCheckSamples - holes) /
-                                    kNumberOfHoleCheckSamples * length);
-    return Smi::FromInt(estimate);
-  }
-}
-
-
-// Returns an array that tells you where in the [0, length) interval an array
-// might have elements.  Can either return an array of keys (positive integers
-// or undefined) or a number representing the positive length of an interval
-// starting at index 0.
-// Intervals can span over some keys that are not in the object.
-RUNTIME_FUNCTION(Runtime_GetArrayKeys) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(2, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(JSObject, array, 0);
-  CONVERT_NUMBER_CHECKED(uint32_t, length, Uint32, args[1]);
-  ElementsKind kind = array->GetElementsKind();
-
-  if (IsFastElementsKind(kind) || IsFixedTypedArrayElementsKind(kind)) {
-    uint32_t actual_length = static_cast<uint32_t>(array->elements()->length());
-    return *isolate->factory()->NewNumberFromUint(Min(actual_length, length));
-  }
-
-  if (kind == FAST_STRING_WRAPPER_ELEMENTS) {
-    int string_length =
-        String::cast(Handle<JSValue>::cast(array)->value())->length();
-    int backing_store_length = array->elements()->length();
-    return *isolate->factory()->NewNumberFromUint(
-        Min(length,
-            static_cast<uint32_t>(Max(string_length, backing_store_length))));
-  }
-
-  KeyAccumulator accumulator(isolate, KeyCollectionMode::kOwnOnly,
-                             ALL_PROPERTIES);
-  for (PrototypeIterator iter(isolate, array, kStartAtReceiver);
-       !iter.IsAtEnd(); iter.Advance()) {
-    Handle<JSReceiver> current(PrototypeIterator::GetCurrent<JSReceiver>(iter));
-    if (current->HasComplexElements()) {
-      return *isolate->factory()->NewNumberFromUint(length);
-    }
-    accumulator.CollectOwnElementIndices(array,
-                                         Handle<JSObject>::cast(current));
-  }
-  // Erase any keys >= length.
-  Handle<FixedArray> keys =
-      accumulator.GetKeys(GetKeysConversion::kKeepNumbers);
-  int j = 0;
-  for (int i = 0; i < keys->length(); i++) {
-    if (NumberToUint32(keys->get(i)) >= length) continue;
-    if (i != j) keys->set(j, keys->get(i));
-    j++;
-  }
-
-  keys = FixedArray::ShrinkOrEmpty(isolate, keys, j);
-  return *isolate->factory()->NewJSArrayWithElements(keys);
-}
-
 RUNTIME_FUNCTION(Runtime_TrySliceSimpleNonFastElements) {
   HandleScope scope(isolate);
   DCHECK_EQ(3, args.length());
@@ -618,8 +532,8 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
     allocation_site = site;
   }
 
-  Handle<JSArray> array = Handle<JSArray>::cast(
-      factory->NewJSObjectFromMap(initial_map, NOT_TENURED, allocation_site));
+  Handle<JSArray> array = Handle<JSArray>::cast(factory->NewJSObjectFromMap(
+      initial_map, AllocationType::kYoung, allocation_site));
 
   factory->NewJSArrayStorage(array, 0, 0, DONT_INITIALIZE_ARRAY_ELEMENTS);
 

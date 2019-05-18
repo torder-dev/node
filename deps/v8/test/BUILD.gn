@@ -44,6 +44,7 @@ group("v8_perf") {
   testonly = true
 
   data_deps = [
+    "..:v8_python_base",
     "cctest:cctest",
     "..:d8",
     "../tools:v8_android_test_runner_deps",
@@ -148,9 +149,7 @@ v8_header_set("common_test_headers") {
   configs = []
 
   public_deps = [
-    # We can't depend on this here, because if the "cctest" target depends on it
-    # we will get duplicate symbols.
-    #"../:v8_for_testing",
+    "../:v8_for_testing",
     "../:v8_libbase",
   ]
 

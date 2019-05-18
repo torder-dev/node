@@ -209,6 +209,9 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_OP(TableInit, "table.init")
     CASE_OP(ElemDrop, "elem.drop")
     CASE_OP(TableCopy, "table.copy")
+    CASE_OP(TableGrow, "table.grow")
+    CASE_OP(TableSize, "table.size")
+    CASE_OP(TableFill, "table.fill")
 
     // SIMD opcodes.
     CASE_SIMD_OP(Splat, "splat")
@@ -268,7 +271,7 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_S1x16_OP(AllTrue, "all_true")
 
     // Atomic operations.
-    CASE_OP(AtomicWake, "atomic_wake")
+    CASE_OP(AtomicNotify, "atomic_notify")
     CASE_INT_OP(AtomicWait, "atomic_wait")
     CASE_UNSIGNED_ALL_OP(AtomicLoad, "atomic_load")
     CASE_UNSIGNED_ALL_OP(AtomicStore, "atomic_store")
@@ -367,6 +370,7 @@ bool WasmOpcodes::IsAnyRefOpcode(WasmOpcode opcode) {
   switch (opcode) {
     case kExprRefNull:
     case kExprRefIsNull:
+    case kExprRefFunc:
       return true;
     default:
       return false;

@@ -4,7 +4,7 @@
 
 #include "src/builtins/builtins.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/assembler-inl.h"
 #include "src/builtins/builtins-descriptors.h"
 #include "src/callable.h"
@@ -291,16 +291,18 @@ constexpr int OffHeapTrampolineGenerator::kBufferSize;
 }  // namespace
 
 // static
-Handle<Code> Builtins::GenerateOffHeapTrampolineFor(Isolate* isolate,
-                                                    Address off_heap_entry) {
+Handle<Code> Builtins::GenerateOffHeapTrampolineFor(
+    Isolate* isolate, Address off_heap_entry, int32_t kind_specfic_flags) {
   DCHECK_NOT_NULL(isolate->embedded_blob());
   DCHECK_NE(0, isolate->embedded_blob_size());
 
   OffHeapTrampolineGenerator generator(isolate);
   CodeDesc desc = generator.Generate(off_heap_entry);
 
-  return isolate->factory()->NewCode(desc, Code::BUILTIN,
-                                     generator.CodeObject());
+  return Factory::CodeBuilder(isolate, desc, Code::BUILTIN)
+      .set_self_reference(generator.CodeObject())
+      .set_read_only_data_container(kind_specfic_flags)
+      .Build();
 }
 
 // static
@@ -311,8 +313,8 @@ Handle<ByteArray> Builtins::GenerateOffHeapTrampolineRelocInfo(
   // generated instruction stream.
   CodeDesc desc = generator.Generate(kNullAddress);
 
-  Handle<ByteArray> reloc_info =
-      isolate->factory()->NewByteArray(desc.reloc_size, TENURED_READ_ONLY);
+  Handle<ByteArray> reloc_info = isolate->factory()->NewByteArray(
+      desc.reloc_size, AllocationType::kReadOnly);
   Code::CopyRelocInfoToByteArray(*reloc_info, desc);
 
   return reloc_info;

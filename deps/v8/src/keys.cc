@@ -4,7 +4,7 @@
 
 #include "src/keys.h"
 
-#include "src/api-arguments-inl.h"
+#include "src/api/api-arguments-inl.h"
 #include "src/elements-inl.h"
 #include "src/field-index-inl.h"
 #include "src/handles-inl.h"
@@ -448,7 +448,9 @@ FastKeyAccumulator::GetOwnKeysWithUninitializedEnumCache() {
   Handle<JSObject> object = Handle<JSObject>::cast(receiver_);
   // Uninitalized enum cache
   Map map = object->map();
-  if (object->elements()->length() != 0) {
+  if (object->elements() != ReadOnlyRoots(isolate_).empty_fixed_array() &&
+      object->elements() !=
+          ReadOnlyRoots(isolate_).empty_slow_element_dictionary()) {
     // Assume that there are elements.
     return MaybeHandle<FixedArray>();
   }

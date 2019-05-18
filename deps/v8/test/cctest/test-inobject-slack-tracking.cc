@@ -6,7 +6,7 @@
 #include <sstream>
 #include <utility>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/objects-inl.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/v8.h"
@@ -85,8 +85,11 @@ static double GetDoubleFieldValue(JSObject obj, FieldIndex field_index) {
     return obj->RawFastDoublePropertyAt(field_index);
   } else {
     Object value = obj->RawFastPropertyAt(field_index);
-    CHECK(value->IsMutableHeapNumber());
-    return MutableHeapNumber::cast(value)->value();
+    if (value->IsMutableHeapNumber()) {
+      return MutableHeapNumber::cast(value)->value();
+    } else {
+      return value->Number();
+    }
   }
 }
 
@@ -1356,6 +1359,116 @@ TEST(Regress8853_FunctionConstructor) {
   CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
   CHECK(IsObjectShrinkable(*obj));
   CHECK_EQ(6 + 8, obj->map()->GetInObjectProperties());
+}
+
+TEST(InstanceFieldsArePropertiesDefaultConstructorLazy) {
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
+
+  Handle<JSObject> obj = CompileRunI<JSObject>(
+      "new (class {\n"
+      "  x00 = null;\n"
+      "  x01 = null;\n"
+      "  x02 = null;\n"
+      "  x03 = null;\n"
+      "  x04 = null;\n"
+      "  x05 = null;\n"
+      "  x06 = null;\n"
+      "  x07 = null;\n"
+      "  x08 = null;\n"
+      "  x09 = null;\n"
+      "  x10 = null;\n"
+      "});\n");
+  CHECK_EQ(11 + 8, obj->map()->GetInObjectProperties());
+}
+
+TEST(InstanceFieldsArePropertiesFieldsAndConstructorLazy) {
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
+
+  Handle<JSObject> obj = CompileRunI<JSObject>(
+      "new (class {\n"
+      "  x00 = null;\n"
+      "  x01 = null;\n"
+      "  x02 = null;\n"
+      "  x03 = null;\n"
+      "  x04 = null;\n"
+      "  x05 = null;\n"
+      "  x06 = null;\n"
+      "  x07 = null;\n"
+      "  x08 = null;\n"
+      "  x09 = null;\n"
+      "  x10 = null;\n"
+      "  constructor() {\n"
+      "    this.x11 = null;\n"
+      "    this.x12 = null;\n"
+      "    this.x12 = null;\n"
+      "    this.x14 = null;\n"
+      "    this.x15 = null;\n"
+      "    this.x16 = null;\n"
+      "    this.x17 = null;\n"
+      "    this.x18 = null;\n"
+      "    this.x19 = null;\n"
+      "    this.x20 = null;\n"
+      "  }\n"
+      "});\n");
+  CHECK_EQ(21 + 8, obj->map()->GetInObjectProperties());
+}
+
+TEST(InstanceFieldsArePropertiesDefaultConstructorEager) {
+  i::FLAG_lazy = false;
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
+
+  Handle<JSObject> obj = CompileRunI<JSObject>(
+      "new (class {\n"
+      "  x00 = null;\n"
+      "  x01 = null;\n"
+      "  x02 = null;\n"
+      "  x03 = null;\n"
+      "  x04 = null;\n"
+      "  x05 = null;\n"
+      "  x06 = null;\n"
+      "  x07 = null;\n"
+      "  x08 = null;\n"
+      "  x09 = null;\n"
+      "  x10 = null;\n"
+      "});\n");
+  CHECK_EQ(11 + 8, obj->map()->GetInObjectProperties());
+}
+
+TEST(InstanceFieldsArePropertiesFieldsAndConstructorEager) {
+  i::FLAG_lazy = false;
+  CcTest::InitializeVM();
+  v8::HandleScope scope(CcTest::isolate());
+
+  Handle<JSObject> obj = CompileRunI<JSObject>(
+      "new (class {\n"
+      "  x00 = null;\n"
+      "  x01 = null;\n"
+      "  x02 = null;\n"
+      "  x03 = null;\n"
+      "  x04 = null;\n"
+      "  x05 = null;\n"
+      "  x06 = null;\n"
+      "  x07 = null;\n"
+      "  x08 = null;\n"
+      "  x09 = null;\n"
+      "  x10 = null;\n"
+      "  constructor() {\n"
+      "    this.x11 = null;\n"
+      "    this.x12 = null;\n"
+      "    this.x12 = null;\n"
+      "    this.x14 = null;\n"
+      "    this.x15 = null;\n"
+      "    this.x16 = null;\n"
+      "    this.x17 = null;\n"
+      "    this.x18 = null;\n"
+      "    this.x19 = null;\n"
+      "    this.x20 = null;\n"
+      "  }\n"
+      "});\n");
+  CHECK_EQ(21 + 8, obj->map()->GetInObjectProperties());
 }
 
 }  // namespace test_inobject_slack_tracking

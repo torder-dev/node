@@ -15,10 +15,12 @@
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
 #include "src/disasm.h"
+#include "src/heap/combined-heap.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/ostreams.h"
 #include "src/runtime/runtime-utils.h"
+#include "src/utils.h"
 #include "src/vector.h"
 
 // Only build the simulator if not compiling for real ARM hardware.
@@ -207,7 +209,7 @@ void ArmDebugger::Debug() {
       v8::internal::EmbeddedVector<char, 256> buffer;
       dasm.InstructionDecode(buffer,
                              reinterpret_cast<byte*>(sim_->get_pc()));
-      PrintF("  0x%08x  %s\n", sim_->get_pc(), buffer.start());
+      PrintF("  0x%08x  %s\n", sim_->get_pc(), buffer.begin());
       last_pc = sim_->get_pc();
     }
     char* line = ReadLine("sim> ");
@@ -331,7 +333,8 @@ void ArmDebugger::Debug() {
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
           Object obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
-          if (obj.IsSmi() || current_heap->Contains(HeapObject::cast(obj))) {
+          if (obj.IsSmi() ||
+              IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
             PrintF(" (");
             if (obj.IsSmi()) {
               PrintF("smi %d", Smi::ToInt(obj));
@@ -388,7 +391,7 @@ void ArmDebugger::Debug() {
           prev = cur;
           cur += dasm.InstructionDecode(buffer, cur);
           PrintF("  0x%08" V8PRIxPTR "  %s\n", reinterpret_cast<intptr_t>(prev),
-                 buffer.start());
+                 buffer.begin());
         }
       } else if (strcmp(cmd, "gdb") == 0) {
         PrintF("relinquishing control to gdb\n");
@@ -1500,7 +1503,6 @@ int32_t Simulator::ProcessPU(Instruction* instr,
     }
     default: {
       UNREACHABLE();
-      break;
     }
   }
   return rn_val;
@@ -2609,7 +2611,6 @@ void Simulator::DecodeType2(Instruction* instr) {
     }
     default: {
       UNREACHABLE();
-      break;
     }
   }
   if (instr->HasB()) {
@@ -3031,7 +3032,6 @@ void Simulator::DecodeType3(Instruction* instr) {
     }
     default: {
       UNREACHABLE();
-      break;
     }
   }
   if (instr->HasB()) {
@@ -4180,6 +4180,9 @@ void CompareGreater(Simulator* simulator, int Vd, int Vm, int Vn, bool ge) {
   simulator->set_neon_register<T, SIZE>(Vd, src1);
 }
 
+float MinMax(float a, float b, bool is_min) {
+  return is_min ? JSMin(a, b) : JSMax(a, b);
+}
 template <typename T>
 T MinMax(T a, T b, bool is_min) {
   return is_min ? std::min(a, b) : std::max(a, b);
@@ -5673,7 +5676,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
     dasm.InstructionDecode(buffer,
                            reinterpret_cast<byte*>(instr));
     PrintF("  0x%08" V8PRIxPTR "  %s\n", reinterpret_cast<intptr_t>(instr),
-           buffer.start());
+           buffer.begin());
   }
   if (instr->ConditionField() == kSpecialCondition) {
     DecodeSpecialCondition(instr);

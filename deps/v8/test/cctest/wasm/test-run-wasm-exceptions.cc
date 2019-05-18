@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "test/cctest/wasm/wasm-atomics-utils.h"
 #include "test/common/wasm/test-signatures.h"
 #include "test/common/wasm/wasm-macro-gen.h"
@@ -79,7 +79,6 @@ WASM_EXEC_TEST(TryCatchCallIndirect) {
       static_cast<uint16_t>(throw_func.function_index())};
   r.builder().AddIndirectFunctionTable(indirect_function_table,
                                        arraysize(indirect_function_table));
-  r.builder().PopulateIndirectFunctionTable();
 
   // Build the main test function.
   BUILD(r, WASM_TRY_CATCH_T(

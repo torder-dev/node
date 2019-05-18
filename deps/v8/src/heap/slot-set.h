@@ -265,7 +265,7 @@ class SlotSet : public Malloced {
   }
 
  private:
-  typedef uint32_t* Bucket;
+  using Bucket = uint32_t*;
   static const int kMaxSlots = (1 << kPageSizeBits) / kTaggedSize;
   static const int kCellsPerBucket = 32;
   static const int kCellsPerBucketLog2 = 5;
@@ -387,7 +387,8 @@ class SlotSet : public Malloced {
 };
 
 enum SlotType {
-  EMBEDDED_OBJECT_SLOT,
+  FULL_EMBEDDED_OBJECT_SLOT,
+  COMPRESSED_EMBEDDED_OBJECT_SLOT,
   OBJECT_SLOT,
   CODE_TARGET_SLOT,
   CODE_ENTRY_SLOT,

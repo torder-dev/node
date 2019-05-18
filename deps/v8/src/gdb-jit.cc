@@ -7,13 +7,13 @@
 #include <memory>
 #include <vector>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/base/bits.h"
 #include "src/base/platform/platform.h"
-#include "src/bootstrapper.h"
 #include "src/frames-inl.h"
 #include "src/frames.h"
 #include "src/global-handles.h"
+#include "src/init/bootstrapper.h"
 #include "src/objects.h"
 #include "src/ostreams.h"
 #include "src/snapshot/natives.h"
@@ -1162,7 +1162,7 @@ class DebugInfoSection : public DebugSection {
       int current_abbreviation = 4;
 
       EmbeddedVector<char, 256> buffer;
-      StringBuilder builder(buffer.start(), buffer.length());
+      StringBuilder builder(buffer.begin(), buffer.length());
 
       for (int param = 0; param < params; ++param) {
         w->WriteULEB128(current_abbreviation++);
@@ -2128,7 +2128,7 @@ void EventHandler(const v8::JitCodeEvent* event) {
       Code code = isolate->heap()->GcSafeFindCodeForInnerPointer(addr);
       LineInfo* lineinfo = GetLineInfo(addr);
       EmbeddedVector<char, 256> buffer;
-      StringBuilder builder(buffer.start(), buffer.length());
+      StringBuilder builder(buffer.begin(), buffer.length());
       builder.AddSubstring(event->name.str, static_cast<int>(event->name.len));
       // It's called UnboundScript in the API but it's a SharedFunctionInfo.
       SharedFunctionInfo shared = event->script.IsEmpty()
@@ -2140,7 +2140,6 @@ void EventHandler(const v8::JitCodeEvent* event) {
     case v8::JitCodeEvent::CODE_MOVED:
       // Enabling the GDB JIT interface should disable code compaction.
       UNREACHABLE();
-      break;
     case v8::JitCodeEvent::CODE_REMOVED:
       // Do nothing.  Instead, adding code causes eviction of any entry whose
       // address range intersects the address range of the added code.

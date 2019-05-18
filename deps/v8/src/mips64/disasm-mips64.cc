@@ -597,7 +597,6 @@ void Decoder::PrintFormat(Instruction* instr) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
   PrintChar(formatLetter);
 }
@@ -2344,7 +2343,6 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
     default:
       printf("a 0x%x \n", instr->OpcodeFieldRaw());
       UNREACHABLE();
-      break;
   }
 }
 
@@ -3034,7 +3032,7 @@ namespace disasm {
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
   v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
-  return tmp_buffer_.start();
+  return tmp_buffer_.begin();
 }
 
 
@@ -3090,7 +3088,7 @@ void Disassembler::Disassemble(FILE* f, byte* begin, byte* end,
     byte* prev_pc = pc;
     pc += d.InstructionDecode(buffer, pc);
     v8::internal::PrintF(f, "%p    %08x      %s\n", static_cast<void*>(prev_pc),
-                         *reinterpret_cast<int32_t*>(prev_pc), buffer.start());
+                         *reinterpret_cast<int32_t*>(prev_pc), buffer.begin());
   }
 }
 

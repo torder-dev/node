@@ -60,6 +60,8 @@ Handle<Object> WasmValueToValueObject(Isolate* isolate, WasmValue value) {
       return isolate->factory()->NewNumber(value.to<float>());
     case kWasmF64:
       return isolate->factory()->NewNumber(value.to<double>());
+    case kWasmAnyRef:
+      return value.to_anyref();
     default:
       UNIMPLEMENTED();
       return isolate->factory()->undefined_value();
@@ -146,8 +148,6 @@ class InterpreterHandle {
         interpreter_(isolate, module_, GetBytes(*debug_info),
                      handle(debug_info->wasm_instance(), isolate)) {}
 
-  ~InterpreterHandle() { DCHECK_EQ(0, activations_.size()); }
-
   WasmInterpreter* interpreter() { return &interpreter_; }
   const WasmModule* module() const { return module_; }
 
@@ -167,37 +167,20 @@ class InterpreterHandle {
   // was not handled inside this activation. In the latter case, a pending
   // exception will have been set on the isolate.
   bool Execute(Handle<WasmInstanceObject> instance_object,
-               Address frame_pointer, uint32_t func_index, Address arg_buffer) {
+               Address frame_pointer, uint32_t func_index,
+               Vector<WasmValue> argument_values,
+               Vector<WasmValue> return_values) {
     DCHECK_GE(module()->functions.size(), func_index);
     FunctionSig* sig = module()->functions[func_index].sig;
-    DCHECK_GE(kMaxInt, sig->parameter_count());
-    int num_params = static_cast<int>(sig->parameter_count());
-    ScopedVector<WasmValue> wasm_args(num_params);
-    Address arg_buf_ptr = arg_buffer;
-    for (int i = 0; i < num_params; ++i) {
-      uint32_t param_size = static_cast<uint32_t>(
-          ValueTypes::ElementSizeInBytes(sig->GetParam(i)));
-#define CASE_ARG_TYPE(type, ctype)                                    \
-  case type:                                                          \
-    DCHECK_EQ(param_size, sizeof(ctype));                             \
-    wasm_args[i] = WasmValue(ReadUnalignedValue<ctype>(arg_buf_ptr)); \
-    break;
-      switch (sig->GetParam(i)) {
-        CASE_ARG_TYPE(kWasmI32, uint32_t)
-        CASE_ARG_TYPE(kWasmI64, uint64_t)
-        CASE_ARG_TYPE(kWasmF32, float)
-        CASE_ARG_TYPE(kWasmF64, double)
-#undef CASE_ARG_TYPE
-        default:
-          UNREACHABLE();
-      }
-      arg_buf_ptr += param_size;
-    }
+    DCHECK_EQ(sig->parameter_count(), argument_values.size());
+    DCHECK_EQ(sig->return_count(), return_values.size());
 
     uint32_t activation_id = StartActivation(frame_pointer);
 
+    WasmCodeRefScope code_ref_scope;
     WasmInterpreter::Thread* thread = interpreter_.GetThread(0);
-    thread->InitFrame(&module()->functions[func_index], wasm_args.start());
+    thread->InitFrame(&module()->functions[func_index],
+                      argument_values.begin());
     bool finished = false;
     while (!finished) {
       // TODO(clemensh): Add occasional StackChecks.
@@ -237,27 +220,12 @@ class InterpreterHandle {
       }
     }
 
-    // Copy back the return value
+    // Copy back the return value.
     DCHECK_GE(kV8MaxWasmFunctionReturns, sig->return_count());
     // TODO(wasm): Handle multi-value returns.
     DCHECK_EQ(1, kV8MaxWasmFunctionReturns);
     if (sig->return_count()) {
-      WasmValue ret_val = thread->GetReturnValue(0);
-#define CASE_RET_TYPE(type, ctype)                               \
-  case type:                                                     \
-    DCHECK_EQ(ValueTypes::ElementSizeInBytes(sig->GetReturn(0)), \
-              sizeof(ctype));                                    \
-    WriteUnalignedValue<ctype>(arg_buffer, ret_val.to<ctype>()); \
-    break;
-      switch (sig->GetReturn(0)) {
-        CASE_RET_TYPE(kWasmI32, uint32_t)
-        CASE_RET_TYPE(kWasmI64, uint64_t)
-        CASE_RET_TYPE(kWasmF32, float)
-        CASE_RET_TYPE(kWasmF64, double)
-#undef CASE_RET_TYPE
-        default:
-          UNREACHABLE();
-      }
+      return_values[0] = thread->GetReturnValue(0);
     }
 
     FinishActivation(frame_pointer, activation_id);
@@ -393,7 +361,6 @@ class InterpreterHandle {
     Isolate* isolate = isolate_;
     Handle<WasmInstanceObject> instance(debug_info->wasm_instance(), isolate);
 
-    // TODO(clemensh): Add globals to the global scope.
     Handle<JSObject> global_scope_object =
         isolate_->factory()->NewJSObjectWithNullProto();
     if (instance->has_memory_object()) {
@@ -407,6 +374,32 @@ class InterpreterHandle {
                                                uint8_array, NONE)
           .Assert();
     }
+
+    DCHECK_EQ(1, interpreter()->GetThreadCount());
+    WasmInterpreter::Thread* thread = interpreter()->GetThread(0);
+
+    uint32_t global_count = thread->GetGlobalCount();
+    if (global_count > 0) {
+      Handle<JSObject> globals_obj =
+          isolate_->factory()->NewJSObjectWithNullProto();
+      Handle<String> globals_name =
+          isolate_->factory()->InternalizeOneByteString(
+              StaticCharVector("globals"));
+      JSObject::SetOwnPropertyIgnoreAttributes(global_scope_object,
+                                               globals_name, globals_obj, NONE)
+          .Assert();
+
+      for (uint32_t i = 0; i < global_count; ++i) {
+        const char* label = "global#%d";
+        Handle<String> name = PrintFToOneByteString<true>(isolate_, label, i);
+        WasmValue value = thread->GetGlobalValue(i);
+        Handle<Object> value_obj = WasmValueToValueObject(isolate_, value);
+        JSObject::SetOwnPropertyIgnoreAttributes(globals_obj, name, value_obj,
+                                                 NONE)
+            .Assert();
+      }
+    }
+
     return global_scope_object;
   }
 
@@ -505,30 +498,14 @@ wasm::InterpreterHandle* GetInterpreterHandleOrNull(WasmDebugInfo debug_info) {
   return Managed<wasm::InterpreterHandle>::cast(handle_obj)->raw();
 }
 
-Handle<FixedArray> GetOrCreateInterpretedFunctions(
-    Isolate* isolate, Handle<WasmDebugInfo> debug_info) {
-  Handle<FixedArray> arr(debug_info->interpreted_functions(), isolate);
-  int num_functions = debug_info->wasm_instance()
-                          ->module_object()
-                          ->native_module()
-                          ->num_functions();
-  if (arr->length() == 0 && num_functions > 0) {
-    arr = isolate->factory()->NewFixedArray(num_functions);
-    debug_info->set_interpreted_functions(*arr);
-  }
-  DCHECK_EQ(num_functions, arr->length());
-  return arr;
-}
-
 }  // namespace
 
 Handle<WasmDebugInfo> WasmDebugInfo::New(Handle<WasmInstanceObject> instance) {
   DCHECK(!instance->has_debug_info());
   Factory* factory = instance->GetIsolate()->factory();
   Handle<WasmDebugInfo> debug_info = Handle<WasmDebugInfo>::cast(
-      factory->NewStruct(WASM_DEBUG_INFO_TYPE, TENURED));
+      factory->NewStruct(WASM_DEBUG_INFO_TYPE, AllocationType::kOld));
   debug_info->set_wasm_instance(*instance);
-  debug_info->set_interpreted_functions(*factory->empty_fixed_array());
   instance->set_debug_info(*debug_info);
   return debug_info;
 }
@@ -545,9 +522,7 @@ wasm::WasmInterpreter* WasmDebugInfo::SetupForTesting(
   auto interp_handle = Managed<wasm::InterpreterHandle>::Allocate(
       isolate, interpreter_size, isolate, debug_info);
   debug_info->set_interpreter_handle(*interp_handle);
-  auto ret = interp_handle->raw()->interpreter();
-  ret->SetCallIndirectTestMode();
-  return ret;
+  return interp_handle->raw()->interpreter();
 }
 
 void WasmDebugInfo::SetBreakpoint(Handle<WasmDebugInfo> debug_info,
@@ -564,8 +539,6 @@ void WasmDebugInfo::RedirectToInterpreter(Handle<WasmDebugInfo> debug_info,
   Isolate* isolate = debug_info->GetIsolate();
   // Ensure that the interpreter is instantiated.
   GetOrCreateInterpreterHandle(isolate, debug_info);
-  Handle<FixedArray> interpreted_functions =
-      GetOrCreateInterpretedFunctions(isolate, debug_info);
   Handle<WasmInstanceObject> instance(debug_info->wasm_instance(), isolate);
   wasm::NativeModule* native_module =
       instance->module_object()->native_module();
@@ -578,15 +551,21 @@ void WasmDebugInfo::RedirectToInterpreter(Handle<WasmDebugInfo> debug_info,
   for (int func_index : func_indexes) {
     DCHECK_LE(0, func_index);
     DCHECK_GT(module->functions.size(), func_index);
-    if (!interpreted_functions->get(func_index)->IsUndefined(isolate)) continue;
+    // Note that this is just a best effort check. Multiple threads can still
+    // race at redirecting the same function to the interpreter, which is OK.
+    if (native_module->IsRedirectedToInterpreter(func_index)) continue;
 
-    wasm::WasmCode* wasm_new_code = compiler::CompileWasmInterpreterEntry(
-        isolate->wasm_engine(), native_module, func_index,
+    wasm::WasmCodeRefScope code_ref_scope;
+    wasm::WasmCompilationResult result = compiler::CompileWasmInterpreterEntry(
+        isolate->wasm_engine(), native_module->enabled_features(), func_index,
         module->functions[func_index].sig);
-    native_module->PublishInterpreterEntry(wasm_new_code, func_index);
-    Handle<Foreign> foreign_holder = isolate->factory()->NewForeign(
-        wasm_new_code->instruction_start(), TENURED);
-    interpreted_functions->set(func_index, *foreign_holder);
+    std::unique_ptr<wasm::WasmCode> wasm_code = native_module->AddCode(
+        func_index, result.code_desc, result.frame_slot_count,
+        result.tagged_parameter_slots, std::move(result.protected_instructions),
+        std::move(result.source_positions), wasm::WasmCode::kInterpreterEntry,
+        wasm::ExecutionTier::kInterpreter);
+    native_module->PublishCode(std::move(wasm_code));
+    DCHECK(native_module->IsRedirectedToInterpreter(func_index));
   }
 }
 
@@ -598,12 +577,14 @@ void WasmDebugInfo::PrepareStep(StepAction step_action) {
 bool WasmDebugInfo::RunInterpreter(Isolate* isolate,
                                    Handle<WasmDebugInfo> debug_info,
                                    Address frame_pointer, int func_index,
-                                   Address arg_buffer) {
+                                   Vector<wasm::WasmValue> argument_values,
+                                   Vector<wasm::WasmValue> return_values) {
   DCHECK_LE(0, func_index);
   auto* handle = GetOrCreateInterpreterHandle(isolate, debug_info);
   Handle<WasmInstanceObject> instance(debug_info->wasm_instance(), isolate);
   return handle->Execute(instance, frame_pointer,
-                         static_cast<uint32_t>(func_index), arg_buffer);
+                         static_cast<uint32_t>(func_index), argument_values,
+                         return_values);
 }
 
 std::vector<std::pair<uint32_t, int>> WasmDebugInfo::GetInterpretedStack(
@@ -644,7 +625,7 @@ Handle<JSFunction> WasmDebugInfo::GetCWasmEntry(
   DCHECK_EQ(debug_info->has_c_wasm_entries(),
             debug_info->has_c_wasm_entry_map());
   if (!debug_info->has_c_wasm_entries()) {
-    auto entries = isolate->factory()->NewFixedArray(4, TENURED);
+    auto entries = isolate->factory()->NewFixedArray(4, AllocationType::kOld);
     debug_info->set_c_wasm_entries(*entries);
     size_t map_size = 0;  // size estimate not so important here.
     auto managed_map = Managed<wasm::SignatureMap>::Allocate(isolate, map_size);
@@ -657,7 +638,7 @@ Handle<JSFunction> WasmDebugInfo::GetCWasmEntry(
     index = static_cast<int32_t>(map->FindOrInsert(*sig));
     if (index == entries->length()) {
       entries = isolate->factory()->CopyFixedArrayAndGrow(
-          entries, entries->length(), TENURED);
+          entries, entries->length(), AllocationType::kOld);
       debug_info->set_c_wasm_entries(*entries);
     }
     DCHECK(entries->get(index)->IsUndefined(isolate));
@@ -665,7 +646,7 @@ Handle<JSFunction> WasmDebugInfo::GetCWasmEntry(
         compiler::CompileCWasmEntry(isolate, sig).ToHandleChecked();
     Handle<WasmExportedFunctionData> function_data =
         Handle<WasmExportedFunctionData>::cast(isolate->factory()->NewStruct(
-            WASM_EXPORTED_FUNCTION_DATA_TYPE, TENURED));
+            WASM_EXPORTED_FUNCTION_DATA_TYPE, AllocationType::kOld));
     function_data->set_wrapper_code(*new_entry_code);
     function_data->set_instance(debug_info->wasm_instance());
     function_data->set_jump_table_offset(-1);

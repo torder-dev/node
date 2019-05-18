@@ -29,7 +29,7 @@
 
 #include "src/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/compilation-cache.h"
 #include "src/debug/debug-interface.h"
 #include "src/debug/debug.h"
@@ -94,7 +94,8 @@ static i::Handle<i::BreakPoint> SetBreakPoint(v8::Local<v8::Function> fun,
   i::Handle<i::BreakPoint> break_point =
       isolate->factory()->NewBreakPoint(++break_point_index, condition_string);
 
-  debug->SetBreakPoint(function, break_point, &position);
+  debug->SetBreakpoint(handle(function->shared(), isolate), break_point,
+                       &position);
   return break_point;
 }
 
@@ -710,6 +711,7 @@ TEST(BreakPointInlinedBuiltin) {
   builtin = CompileRun("Math.sin").As<v8::Function>();
   CompileRun("function test(x) { return 1 + Math.sin(x) }");
   CompileRun(
+      "%PrepareFunctionForOptimization(test);"
       "test(0.5); test(0.6);"
       "%OptimizeFunctionOnNextCall(test); test(0.7);");
   CHECK_EQ(0, break_point_hit_count);
@@ -722,7 +724,9 @@ TEST(BreakPointInlinedBuiltin) {
   CHECK_EQ(2, break_point_hit_count);
 
   // Re-optimize.
-  CompileRun("%OptimizeFunctionOnNextCall(test);");
+  CompileRun(
+      "%PrepareFunctionForOptimization(test);"
+      "%OptimizeFunctionOnNextCall(test);");
   ExpectBoolean("test(0.3) < 2", true);
   CHECK_EQ(3, break_point_hit_count);
 
@@ -755,6 +759,7 @@ TEST(BreakPointInlineBoundBuiltin) {
                 .As<v8::Function>();
   CompileRun("function test(x) { return 'a' + boundrepeat(x) }");
   CompileRun(
+      "%PrepareFunctionForOptimization(test);"
       "test(4); test(5);"
       "%OptimizeFunctionOnNextCall(test); test(6);");
   CHECK_EQ(0, break_point_hit_count);
@@ -767,7 +772,9 @@ TEST(BreakPointInlineBoundBuiltin) {
   CHECK_EQ(2, break_point_hit_count);
 
   // Re-optimize.
-  CompileRun("%OptimizeFunctionOnNextCall(test);");
+  CompileRun(
+      "%PrepareFunctionForOptimization(f);"
+      "%OptimizeFunctionOnNextCall(test);");
   CompileRun("test(8);");
   CHECK_EQ(3, break_point_hit_count);
 
@@ -797,6 +804,7 @@ TEST(BreakPointInlinedConstructorBuiltin) {
   builtin = CompileRun("Promise").As<v8::Function>();
   CompileRun("function test(x) { return new Promise(()=>x); }");
   CompileRun(
+      "%PrepareFunctionForOptimization(test);"
       "test(4); test(5);"
       "%OptimizeFunctionOnNextCall(test); test(6);");
   CHECK_EQ(0, break_point_hit_count);
@@ -809,7 +817,9 @@ TEST(BreakPointInlinedConstructorBuiltin) {
   CHECK_EQ(2, break_point_hit_count);
 
   // Re-optimize.
-  CompileRun("%OptimizeFunctionOnNextCall(test);");
+  CompileRun(
+      "%PrepareFunctionForOptimization(f);"
+      "%OptimizeFunctionOnNextCall(test);");
   CompileRun("test(8);");
   CHECK_EQ(3, break_point_hit_count);
 
@@ -840,6 +850,7 @@ TEST(BreakPointBuiltinConcurrentOpt) {
   CompileRun("function test(x) { return 1 + Math.sin(x) }");
   // Trigger concurrent compile job. It is suspended until unblock.
   CompileRun(
+      "%PrepareFunctionForOptimization(test);"
       "test(0.5); test(0.6);"
       "%OptimizeFunctionOnNextCall(test, 'concurrent'); test(0.7);");
   CHECK_EQ(0, break_point_hit_count);
@@ -878,6 +889,7 @@ TEST(BreakPointBuiltinTFOperator) {
   builtin = CompileRun("String.prototype.indexOf").As<v8::Function>();
   CompileRun("function test(x) { return 1 + 'foo'.indexOf(x) }");
   CompileRun(
+      "%PrepareFunctionForOptimization(f);"
       "test('a'); test('b');"
       "%OptimizeFunctionOnNextCall(test); test('c');");
   CHECK_EQ(0, break_point_hit_count);
@@ -890,7 +902,9 @@ TEST(BreakPointBuiltinTFOperator) {
   CHECK_EQ(2, break_point_hit_count);
 
   // Re-optimize.
-  CompileRun("%OptimizeFunctionOnNextCall(test);");
+  CompileRun(
+      "%PrepareFunctionForOptimization(f);"
+      "%OptimizeFunctionOnNextCall(test);");
   CompileRun("test('e');");
   CHECK_EQ(3, break_point_hit_count);
 
@@ -1167,11 +1181,27 @@ TEST(BreakPointApiAccessor) {
   CompileRun("set_loop();");
   CHECK_EQ(42, break_point_hit_count);
 
+  // Test that the break point also works when we install the function
+  // template on a new property (with a fresh AccessorPair instance).
+  v8::Local<v8::ObjectTemplate> baz_template =
+      v8::ObjectTemplate::New(env->GetIsolate());
+  baz_template->SetAccessorProperty(v8_str("g"), accessor_template,
+                                    accessor_template);
+  v8::Local<v8::Object> baz =
+      baz_template->NewInstance(env.local()).ToLocalChecked();
+  env->Global()->Set(env.local(), v8_str("b"), baz).ToChecked();
+
+  CompileRun("b.g = 4");
+  CHECK_EQ(43, break_point_hit_count);
+
+  CompileRun("b.g");
+  CHECK_EQ(44, break_point_hit_count);
+
   // Run without breakpoints.
   ClearBreakPoint(bp);
   CompileRun("o.f = 3");
   CompileRun("o.f");
-  CHECK_EQ(42, break_point_hit_count);
+  CHECK_EQ(44, break_point_hit_count);
 
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
@@ -1194,7 +1224,9 @@ TEST(BreakPointInlineApiFunction) {
       function_template->GetFunction(env.local()).ToLocalChecked();
 
   env->Global()->Set(env.local(), v8_str("f"), function).ToChecked();
-  CompileRun("function g() { return 1 +  f(); }");
+  CompileRun(
+      "function g() { return 1 +  f(); };"
+      "%PrepareFunctionForOptimization(g);");
 
   // === Test simple builtin ===
   break_point_hit_count = 0;
@@ -1365,6 +1397,7 @@ TEST(BreakPointInlining) {
       CompileRun("function f(x) { return x*2; } f").As<v8::Function>();
   CompileRun("function test(x) { return 1 + f(x) }");
   CompileRun(
+      "%PrepareFunctionForOptimization(test);"
       "test(0.5); test(0.6);"
       "%OptimizeFunctionOnNextCall(test); test(0.7);");
   CHECK_EQ(0, break_point_hit_count);
@@ -1377,7 +1410,9 @@ TEST(BreakPointInlining) {
   CHECK_EQ(2, break_point_hit_count);
 
   // Re-optimize.
-  CompileRun("%OptimizeFunctionOnNextCall(test);");
+  CompileRun(
+      "%PrepareFunctionForOptimization(test);"
+      "%OptimizeFunctionOnNextCall(test);");
   CompileRun("test(0.3);");
   CHECK_EQ(3, break_point_hit_count);
 
@@ -3020,7 +3055,7 @@ class EmptyExternalStringResource : public v8::String::ExternalStringResource {
   EmptyExternalStringResource() { empty_[0] = 0; }
   ~EmptyExternalStringResource() override = default;
   size_t length() const override { return empty_.length(); }
-  const uint16_t* data() const override { return empty_.start(); }
+  const uint16_t* data() const override { return empty_.begin(); }
 
  private:
   ::v8::internal::EmbeddedVector<uint16_t, 1> empty_;
@@ -3433,7 +3468,7 @@ static void TestDebugBreakInLoop(const char* loop_head,
     SNPrintF(buffer, "function f() {%s%s%s}", loop_head, loop_bodies[i],
              loop_tail);
 
-    i::PrintF("%s\n", buffer.start());
+    i::PrintF("%s\n", buffer.begin());
 
     for (int j = 0; j < 3; j++) {
       break_point_hit_count_deoptimize = j;
@@ -3446,7 +3481,7 @@ static void TestDebugBreakInLoop(const char* loop_head,
       terminate_after_max_break_point_hit = true;
 
       // Function with infinite loop.
-      CompileRun(buffer.start());
+      CompileRun(buffer.begin());
 
       // Set the debug break to enter the debugger as soon as possible.
       v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
@@ -3559,7 +3594,7 @@ class DebugBreakInlineListener : public v8::debug::DebugDelegate {
                              const std::vector<v8::debug::BreakpointId>&
                                  inspector_break_points_hit) override {
     int expected_frame_count = 4;
-    int expected_line_number[] = {1, 4, 7, 12};
+    int expected_line_number[] = {1, 4, 7, 13};
 
     int frame_count = 0;
     auto iterator = v8::debug::StackTraceIterator::Create(CcTest::isolate());
@@ -3577,18 +3612,19 @@ TEST(DebugBreakInline) {
   v8::HandleScope scope(env->GetIsolate());
   v8::Local<v8::Context> context = env.local();
   const char* source =
-      "function debug(b) {             \n"
-      "  if (b) debugger;              \n"
-      "}                               \n"
-      "function f(b) {                 \n"
-      "  debug(b)                      \n"
-      "};                              \n"
-      "function g(b) {                 \n"
-      "  f(b);                         \n"
-      "};                              \n"
-      "g(false);                       \n"
-      "g(false);                       \n"
-      "%OptimizeFunctionOnNextCall(g); \n"
+      "function debug(b) {                 \n"
+      "  if (b) debugger;                  \n"
+      "}                                   \n"
+      "function f(b) {                     \n"
+      "  debug(b)                          \n"
+      "};                                  \n"
+      "function g(b) {                     \n"
+      "  f(b);                             \n"
+      "};                                  \n"
+      "%PrepareFunctionForOptimization(g); \n"
+      "g(false);                           \n"
+      "g(false);                           \n"
+      "%OptimizeFunctionOnNextCall(g);     \n"
       "g(true);";
   DebugBreakInlineListener delegate;
   v8::debug::SetDebugDelegate(env->GetIsolate(), &delegate);
@@ -4023,7 +4059,7 @@ UNINITIALIZED_TEST(DebugSetOutOfMemoryListener) {
     // The following allocation fails unless the out-of-memory callback
     // increases the heap limit.
     int length = 10 * i::MB / i::kTaggedSize;
-    i_isolate->factory()->NewFixedArray(length, i::TENURED);
+    i_isolate->factory()->NewFixedArray(length, i::AllocationType::kOld);
     CHECK(near_heap_limit_callback_called);
     isolate->RemoveNearHeapLimitCallback(NearHeapLimitCallback, 0);
   }
@@ -4031,8 +4067,6 @@ UNINITIALIZED_TEST(DebugSetOutOfMemoryListener) {
 }
 
 TEST(DebugCoverage) {
-  // Coverage needs feedback vectors.
-  if (i::FLAG_lite_mode) return;
   i::FLAG_always_opt = false;
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -4087,8 +4121,6 @@ v8::debug::Coverage::ScriptData GetScriptDataAndDeleteCoverage(
 }  // namespace
 
 TEST(DebugCoverageWithCoverageOutOfScope) {
-  // Coverage needs feedback vectors.
-  if (i::FLAG_lite_mode) return;
   i::FLAG_always_opt = false;
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -4159,8 +4191,6 @@ v8::debug::Coverage::FunctionData GetFunctionDataAndDeleteCoverage(
 }  // namespace
 
 TEST(DebugCoverageWithScriptDataOutOfScope) {
-  // Coverage needs feedback vectors.
-  if (i::FLAG_lite_mode) return;
   i::FLAG_always_opt = false;
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -4283,7 +4313,8 @@ UNINITIALIZED_TEST(LoadedAtStartupScripts) {
     LocalContext context(isolate);
 
     std::vector<i::Handle<i::Script>> scripts;
-    CompileWithOrigin(v8_str("function foo(){}"), v8_str("normal.js"));
+    CompileWithOrigin(v8_str("function foo(){}"), v8_str("normal.js"),
+                      v8_bool(false));
     std::unordered_map<int, int> count_by_type;
     {
       i::DisallowHeapAllocation no_gc;
@@ -4510,8 +4541,6 @@ TEST(GetPrivateFields) {
   v8::internal::Isolate* isolate = CcTest::i_isolate();
   v8::HandleScope scope(v8_isolate);
   v8::Local<v8::Context> context = env.local();
-  v8::internal::FLAG_harmony_class_fields = true;
-  v8::internal::FLAG_harmony_private_fields = true;
   v8::Local<v8::String> source = v8_str(
       "var X = class {\n"
       "  #foo = 1;\n"

@@ -7,11 +7,11 @@
 #include <memory>
 #include <unordered_set>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
+#include "src/api/api-natives.h"
 #include "src/arguments.h"
 #include "src/assembler-inl.h"
 #include "src/base/platform/mutex.h"
-#include "src/bootstrapper.h"
 #include "src/builtins/builtins.h"
 #include "src/compilation-cache.h"
 #include "src/compiler.h"
@@ -24,6 +24,7 @@
 #include "src/global-handles.h"
 #include "src/globals.h"
 #include "src/heap/heap-inl.h"  // For NextDebuggingId.
+#include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecode-array-accessor.h"
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/interpreter.h"
@@ -588,13 +589,12 @@ bool Debug::CheckBreakPoint(Handle<BreakPoint> break_point,
   return result->BooleanValue(isolate_);
 }
 
-bool Debug::SetBreakPoint(Handle<JSFunction> function,
+bool Debug::SetBreakpoint(Handle<SharedFunctionInfo> shared,
                           Handle<BreakPoint> break_point,
                           int* source_position) {
   HandleScope scope(isolate_);
 
   // Make sure the function is compiled and has set up the debug info.
-  Handle<SharedFunctionInfo> shared(function->shared(), isolate_);
   if (!EnsureBreakInfo(shared)) return false;
   PrepareFunctionForDebugExecution(shared);
 
@@ -749,13 +749,13 @@ int Debug::GetFunctionDebuggingId(Handle<JSFunction> function) {
   return id;
 }
 
-bool Debug::SetBreakpointForFunction(Handle<JSFunction> function,
+bool Debug::SetBreakpointForFunction(Handle<SharedFunctionInfo> shared,
                                      Handle<String> condition, int* id) {
   *id = ++thread_local_.last_breakpoint_id_;
   Handle<BreakPoint> breakpoint =
       isolate_->factory()->NewBreakPoint(*id, condition);
   int source_position = 0;
-  return SetBreakPoint(function, breakpoint, &source_position);
+  return SetBreakpoint(shared, breakpoint, &source_position);
 }
 
 void Debug::RemoveBreakpoint(int id) {
@@ -1023,7 +1023,6 @@ void Debug::PrepareStep(StepAction step_action) {
   switch (step_action) {
     case StepNone:
       UNREACHABLE();
-      break;
     case StepOut: {
       // Clear last position info. For stepping out it does not matter.
       thread_local_.last_statement_position_ = kNoSourcePosition;
@@ -1135,31 +1134,6 @@ void Debug::ClearOneShot() {
   }
 }
 
-class RedirectActiveFunctions : public ThreadVisitor {
- public:
-  explicit RedirectActiveFunctions(SharedFunctionInfo shared)
-      : shared_(shared) {
-    DCHECK(shared->HasBytecodeArray());
-  }
-
-  void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
-    for (JavaScriptFrameIterator it(isolate, top); !it.done(); it.Advance()) {
-      JavaScriptFrame* frame = it.frame();
-      JSFunction function = frame->function();
-      if (!frame->is_interpreted()) continue;
-      if (function->shared() != shared_) continue;
-      InterpretedFrame* interpreted_frame =
-          reinterpret_cast<InterpretedFrame*>(frame);
-      BytecodeArray debug_copy = shared_->GetDebugInfo()->DebugBytecodeArray();
-      interpreted_frame->PatchBytecodeArray(debug_copy);
-    }
-  }
-
- private:
-  SharedFunctionInfo shared_;
-  DisallowHeapAllocation no_gc_;
-};
-
 void Debug::DeoptimizeFunction(Handle<SharedFunctionInfo> shared) {
   // Deoptimize all code compiled from this shared function info including
   // inlining.
@@ -1217,7 +1191,8 @@ void Debug::PrepareFunctionForDebugExecution(
   } else {
     DeoptimizeFunction(shared);
     // Update PCs on the stack to point to recompiled code.
-    RedirectActiveFunctions redirect_visitor(*shared);
+    RedirectActiveFunctions redirect_visitor(
+        *shared, RedirectActiveFunctions::Mode::kUseDebugBytecode);
     redirect_visitor.VisitThread(isolate_, isolate_->thread_local_top());
     isolate_->thread_manager()->IterateArchivedThreads(&redirect_visitor);
   }
@@ -1249,6 +1224,7 @@ void Debug::InstallDebugBreakTrampoline() {
 
   Handle<Code> trampoline = BUILTIN_CODE(isolate_, DebugBreakTrampoline);
   std::vector<Handle<JSFunction>> needs_compile;
+  std::vector<Handle<AccessorPair>> needs_instantiate;
   {
     HeapIterator iterator(isolate_->heap());
     for (HeapObject obj = iterator.next(); !obj.is_null();
@@ -1266,9 +1242,37 @@ void Debug::InstallDebugBreakTrampoline() {
         } else {
           fun->set_code(*trampoline);
         }
+      } else if (obj->IsAccessorPair()) {
+        AccessorPair accessor_pair = AccessorPair::cast(obj);
+        if (accessor_pair->getter()->IsFunctionTemplateInfo() ||
+            accessor_pair->setter()->IsFunctionTemplateInfo()) {
+          needs_instantiate.push_back(handle(accessor_pair, isolate_));
+        }
       }
     }
   }
+
+  // Forcibly instantiate all lazy accessor pairs to make sure that they
+  // properly hit the debug break trampoline.
+  for (Handle<AccessorPair> accessor_pair : needs_instantiate) {
+    if (accessor_pair->getter()->IsFunctionTemplateInfo()) {
+      Handle<JSFunction> fun =
+          ApiNatives::InstantiateFunction(
+              handle(FunctionTemplateInfo::cast(accessor_pair->getter()),
+                     isolate_))
+              .ToHandleChecked();
+      accessor_pair->set_getter(*fun);
+    }
+    if (accessor_pair->setter()->IsFunctionTemplateInfo()) {
+      Handle<JSFunction> fun =
+          ApiNatives::InstantiateFunction(
+              handle(FunctionTemplateInfo::cast(accessor_pair->setter()),
+                     isolate_))
+              .ToHandleChecked();
+      accessor_pair->set_setter(*fun);
+    }
+  }
+
   // By overwriting the function code with DebugBreakTrampoline, which tailcalls
   // to shared code, we bypass CompileLazy. Perform CompileLazy here instead.
   for (Handle<JSFunction> fun : needs_compile) {
@@ -2026,7 +2030,7 @@ void Debug::PrintBreakLocation() {
     String::FlatContent content = source->GetFlatContent(no_gc);
     if (content.IsOneByte()) {
       PrintF("[debug] %.*s\n", line_end - line_start,
-             content.ToOneByteVector().start() + line_start);
+             content.ToOneByteVector().begin() + line_start);
       PrintF("[debug] ");
       for (int i = 0; i < column; i++) PrintF(" ");
       PrintF("^\n");

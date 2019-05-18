@@ -82,9 +82,23 @@ constexpr int kStackSpaceRequiredForCompilation = 40;
 #define V8_DOUBLE_FIELDS_UNBOXING false
 #endif
 
+// Determine whether tagged pointers are 8 bytes (used in Torque layouts for
+// choosing where to insert padding).
+#if V8_TARGET_ARCH_64_BIT && !defined(V8_COMPRESS_POINTERS)
+#define TAGGED_SIZE_8_BYTES true
+#else
+#define TAGGED_SIZE_8_BYTES false
+#endif
+
 // Some types of tracing require the SFI to store a unique ID.
 #if defined(V8_TRACE_MAPS) || defined(V8_TRACE_IGNITION)
 #define V8_SFI_HAS_UNIQUE_ID true
+#else
+#define V8_SFI_HAS_UNIQUE_ID false
+#endif
+
+#if defined(V8_OS_WIN) && defined(V8_TARGET_ARCH_X64)
+#define V8_OS_WIN_X64 true
 #endif
 
 // Superclass for classes only using static method functions.
@@ -156,7 +170,6 @@ constexpr size_t kMaxWasmCodeMemory = kMaxWasmCodeMB * MB;
 constexpr int kSystemPointerSizeLog2 = 3;
 constexpr intptr_t kIntptrSignBit =
     static_cast<intptr_t>(uintptr_t{0x8000000000000000});
-constexpr uintptr_t kUintptrAllBitsSet = uintptr_t{0xFFFFFFFFFFFFFFFF};
 constexpr bool kRequiresCodeRange = true;
 #if V8_HOST_ARCH_PPC && V8_TARGET_ARCH_PPC && V8_OS_LINUX
 constexpr size_t kMaximalCodeRangeSize = 512 * MB;
@@ -178,7 +191,6 @@ constexpr size_t kReservedCodeRangePages = 0;
 #else
 constexpr int kSystemPointerSizeLog2 = 2;
 constexpr intptr_t kIntptrSignBit = 0x80000000;
-constexpr uintptr_t kUintptrAllBitsSet = 0xFFFFFFFFu;
 #if V8_HOST_ARCH_PPC && V8_TARGET_ARCH_PPC && V8_OS_LINUX
 constexpr bool kRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 0 * MB;
@@ -225,7 +237,12 @@ using AtomicTagged_t = base::AtomicWord;
 
 #endif  // V8_COMPRESS_POINTERS
 
+// Defines whether the branchless or branchful implementation of pointer
+// decompression should be used.
+constexpr bool kUseBranchlessPtrDecompression = true;
+
 STATIC_ASSERT(kTaggedSize == (1 << kTaggedSizeLog2));
+STATIC_ASSERT((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);
 
 using AsAtomicTagged = base::AsAtomicPointerImpl<AtomicTagged_t>;
 STATIC_ASSERT(sizeof(Tagged_t) == kTaggedSize);
@@ -308,7 +325,8 @@ F FUNCTION_CAST(Address addr) {
 // which provide a level of indirection between the function pointer
 // and the function entrypoint.
 #if V8_HOST_ARCH_PPC && \
-    (V8_OS_AIX || (V8_TARGET_ARCH_PPC64 && V8_TARGET_BIG_ENDIAN))
+    (V8_OS_AIX || (V8_TARGET_ARCH_PPC64 && V8_TARGET_BIG_ENDIAN && \
+    (!defined(_CALL_ELF) || _CALL_ELF == 1)))
 #define USES_FUNCTION_DESCRIPTORS 1
 #define FUNCTION_ENTRYPOINT_ADDRESS(f)       \
   (reinterpret_cast<v8::internal::Address*>( \
@@ -330,14 +348,18 @@ inline size_t hash_value(LanguageMode mode) {
   return static_cast<size_t>(mode);
 }
 
-inline std::ostream& operator<<(std::ostream& os, const LanguageMode& mode) {
+inline const char* LanguageMode2String(LanguageMode mode) {
   switch (mode) {
     case LanguageMode::kSloppy:
-      return os << "sloppy";
+      return "sloppy";
     case LanguageMode::kStrict:
-      return os << "strict";
+      return "strict";
   }
   UNREACHABLE();
+}
+
+inline std::ostream& operator<<(std::ostream& os, LanguageMode mode) {
+  return os << LanguageMode2String(mode);
 }
 
 inline bool is_sloppy(LanguageMode language_mode) {
@@ -533,12 +555,18 @@ static const intptr_t kPageAlignmentMask = (intptr_t{1} << kPageSizeBits) - 1;
 // If looking only at the top 32 bits, the QNaN mask is bits 19 to 30.
 constexpr uint32_t kQuietNaNHighBitsMask = 0xfff << (51 - 32);
 
+enum class HeapObjectReferenceType {
+  WEAK,
+  STRONG,
+};
+
 // -----------------------------------------------------------------------------
 // Forward declarations for frequently used classes
 
 class AccessorInfo;
 class Arguments;
 class Assembler;
+class ClassScope;
 class Code;
 class CodeSpace;
 class Context;
@@ -584,6 +612,8 @@ class NewSpace;
 class NewLargeObjectSpace;
 class NumberDictionary;
 class Object;
+template <HeapObjectReferenceType kRefType, typename StorageType>
+class TaggedImpl;
 class CompressedObjectSlot;
 class CompressedMaybeObjectSlot;
 class CompressedMapWordSlot;
@@ -603,6 +633,7 @@ class Smi;
 template <typename Config, class Allocator = FreeStoreAllocationPolicy>
 class SplayTree;
 class String;
+class StringStream;
 class Struct;
 class Symbol;
 class Variable;
@@ -685,7 +716,7 @@ enum AllocationSpace {
 constexpr int kSpaceTagSize = 4;
 STATIC_ASSERT(FIRST_SPACE == 0);
 
-enum class AllocationType {
+enum class AllocationType : uint8_t {
   kYoung,    // Regular object allocated in NEW_SPACE or NEW_LO_SPACE
   kOld,      // Regular object allocated in OLD_SPACE or LO_SPACE
   kCode,     // Code object allocated in CODE_SPACE or CODE_LO_SPACE
@@ -693,54 +724,32 @@ enum class AllocationType {
   kReadOnly  // Object allocated in RO_SPACE
 };
 
+inline size_t hash_value(AllocationType kind) {
+  return static_cast<uint8_t>(kind);
+}
+
+inline std::ostream& operator<<(std::ostream& os, AllocationType kind) {
+  switch (kind) {
+    case AllocationType::kYoung:
+      return os << "Young";
+    case AllocationType::kOld:
+      return os << "Old";
+    case AllocationType::kCode:
+      return os << "Code";
+    case AllocationType::kMap:
+      return os << "Map";
+    case AllocationType::kReadOnly:
+      return os << "ReadOnly";
+  }
+  UNREACHABLE();
+}
+
 // TODO(ishell): review and rename kWordAligned to kTaggedAligned.
 enum AllocationAlignment { kWordAligned, kDoubleAligned, kDoubleUnaligned };
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
-// Supported write barrier modes.
-enum WriteBarrierKind : uint8_t {
-  kNoWriteBarrier,
-  kMapWriteBarrier,
-  kPointerWriteBarrier,
-  kFullWriteBarrier
-};
-
-inline size_t hash_value(WriteBarrierKind kind) {
-  return static_cast<uint8_t>(kind);
-}
-
-inline std::ostream& operator<<(std::ostream& os, WriteBarrierKind kind) {
-  switch (kind) {
-    case kNoWriteBarrier:
-      return os << "NoWriteBarrier";
-    case kMapWriteBarrier:
-      return os << "MapWriteBarrier";
-    case kPointerWriteBarrier:
-      return os << "PointerWriteBarrier";
-    case kFullWriteBarrier:
-      return os << "FullWriteBarrier";
-  }
-  UNREACHABLE();
-}
-
-// A flag that indicates whether objects should be pretenured when
-// allocated (allocated directly into either the old generation or read-only
-// space), or not (allocated in the young generation if the object size and type
-// allows).
-enum PretenureFlag { NOT_TENURED, TENURED, TENURED_READ_ONLY };
-
-inline std::ostream& operator<<(std::ostream& os, const PretenureFlag& flag) {
-  switch (flag) {
-    case NOT_TENURED:
-      return os << "NotTenured";
-    case TENURED:
-      return os << "Tenured";
-    case TENURED_READ_ONLY:
-      return os << "TenuredReadOnly";
-  }
-  UNREACHABLE();
-}
+enum class AllowLargeObjects { kFalse, kTrue };
 
 enum MinimumCapacity {
   USE_DEFAULT_MINIMUM_CAPACITY,
@@ -750,8 +759,6 @@ enum MinimumCapacity {
 enum GarbageCollector { SCAVENGER, MARK_COMPACTOR, MINOR_MARK_COMPACTOR };
 
 enum Executability { NOT_EXECUTABLE, EXECUTABLE };
-
-enum Movability { kMovable, kImmovable };
 
 enum VisitMode {
   VISIT_ALL,
@@ -763,11 +770,16 @@ enum VisitMode {
   VISIT_FOR_SERIALIZATION,
 };
 
+enum class BytecodeFlushMode {
+  kDoNotFlushBytecode,
+  kFlushBytecode,
+  kStressFlushBytecode,
+};
+
 // Flag indicating whether code is built into the VM (one of the natives files).
 enum NativesFlag {
   NOT_NATIVES_CODE,
   EXTENSION_CODE,
-  NATIVES_CODE,
   INSPECTOR_CODE
 };
 
@@ -884,9 +896,13 @@ constexpr int kIeeeDoubleExponentWordOffset = 0;
 #define HAS_SMI_TAG(value) \
   ((static_cast<intptr_t>(value) & ::i::kSmiTagMask) == ::i::kSmiTag)
 
-#define HAS_HEAP_OBJECT_TAG(value)                              \
+#define HAS_STRONG_HEAP_OBJECT_TAG(value)                       \
   (((static_cast<intptr_t>(value) & ::i::kHeapObjectTagMask) == \
     ::i::kHeapObjectTag))
+
+#define HAS_WEAK_HEAP_OBJECT_TAG(value)                         \
+  (((static_cast<intptr_t>(value) & ::i::kHeapObjectTagMask) == \
+    ::i::kWeakHeapObjectTag))
 
 // OBJECT_POINTER_ALIGN returns the value aligned as a HeapObject pointer
 #define OBJECT_POINTER_ALIGN(value) \
@@ -971,6 +987,7 @@ inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
 }
 
 enum ScopeType : uint8_t {
+  CLASS_SCOPE,     // The scope introduced by a class.
   EVAL_SCOPE,      // The top-level scope for an eval source.
   FUNCTION_SCOPE,  // The top-level scope for a function.
   MODULE_SCOPE,    // The scope introduced by a module literal
@@ -994,6 +1011,8 @@ inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
       return os << "CATCH_SCOPE";
     case ScopeType::BLOCK_SCOPE:
       return os << "BLOCK_SCOPE";
+    case ScopeType::CLASS_SCOPE:
+      return os << "CLASS_SCOPE";
     case ScopeType::WITH_SCOPE:
       return os << "WITH_SCOPE";
   }
@@ -1449,17 +1468,6 @@ enum IsolateAddressId {
       kIsolateAddressCount
 };
 
-V8_INLINE static bool HasWeakHeapObjectTag(Address value) {
-  // TODO(jkummerow): Consolidate integer types here.
-  return ((static_cast<intptr_t>(value) & kHeapObjectTagMask) ==
-          kWeakHeapObjectTag);
-}
-
-enum class HeapObjectReferenceType {
-  WEAK,
-  STRONG,
-};
-
 enum class PoisoningMitigationLevel {
   kPoisonAll,
   kDontPoison,
@@ -1565,6 +1573,9 @@ enum class StubCallMode {
 
 constexpr int kFunctionLiteralIdInvalid = -1;
 constexpr int kFunctionLiteralIdTopLevel = 0;
+
+constexpr int kSmallOrderedHashSetMinCapacity = 4;
+constexpr int kSmallOrderedHashMapMinCapacity = 4;
 
 }  // namespace internal
 }  // namespace v8

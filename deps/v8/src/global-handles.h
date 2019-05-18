@@ -39,7 +39,7 @@ enum WeaknessType {
 
 // Global handles hold handles that are independent of stack-state and can have
 // callbacks and finalizers attached to them.
-class GlobalHandles final {
+class V8_EXPORT_PRIVATE GlobalHandles final {
  public:
   template <class NodeType>
   class NodeBlock;
@@ -231,6 +231,7 @@ class GlobalHandles final {
       traced_pending_phantom_callbacks_;
   std::vector<PendingPhantomCallback> second_pass_callbacks_;
   bool second_pass_callbacks_task_posted_ = false;
+  bool running_second_pass_callbacks_ = false;
 
   // Counter for recursive garbage collections during callback processing.
   unsigned post_gc_processing_count_ = 0;
@@ -269,7 +270,7 @@ class EternalHandles final {
   ~EternalHandles();
 
   // Create an EternalHandle, overwriting the index.
-  void Create(Isolate* isolate, Object object, int* index);
+  V8_EXPORT_PRIVATE void Create(Isolate* isolate, Object object, int* index);
 
   // Grab the handle for an existing EternalHandle.
   inline Handle<Object> Get(int index) {

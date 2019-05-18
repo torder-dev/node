@@ -17,13 +17,13 @@
 #include "src/base/bits.h"
 #include "src/base/tsan.h"
 #include "src/builtins/builtins.h"
-#include "src/conversions.h"
-#include "src/double.h"
 #include "src/handles-inl.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/keys.h"
 #include "src/lookup-inl.h"  // TODO(jkummerow): Drop.
+#include "src/numbers/conversions.h"
+#include "src/numbers/double.h"
 #include "src/objects/bigint.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
@@ -35,10 +35,12 @@
 #include "src/objects/shared-function-info.h"
 #include "src/objects/slots-inl.h"
 #include "src/objects/smi-inl.h"
+#include "src/objects/tagged-impl-inl.h"
 #include "src/objects/templates.h"
 #include "src/property-details.h"
 #include "src/property.h"
 #include "src/v8memory.h"
+#include "torque-generated/class-definitions-tq-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -119,6 +121,12 @@ bool Object::IsNullOrUndefined(ReadOnlyRoots roots) const {
 
 bool Object::IsNullOrUndefined() const {
   return IsHeapObject() && HeapObject::cast(*this)->IsNullOrUndefined();
+}
+
+bool Object::IsZero() const { return *this == Smi::zero(); }
+
+bool Object::IsNoSharedNameSentinel() const {
+  return *this == SharedFunctionInfo::kNoSharedNameSentinel;
 }
 
 bool HeapObject::IsNullOrUndefined(Isolate* isolate) const {
@@ -221,8 +229,6 @@ bool HeapObject::IsJSCollection() const { return IsJSMap() || IsJSSet(); }
 bool HeapObject::IsPromiseReactionJobTask() const {
   return IsPromiseFulfillReactionJobTask() || IsPromiseRejectReactionJobTask();
 }
-
-bool HeapObject::IsEnumCache() const { return IsTuple2(); }
 
 bool HeapObject::IsFrameArray() const { return IsFixedArrayExact(); }
 
@@ -381,6 +387,16 @@ double Object::Number() const {
   DCHECK(IsNumber());
   return IsSmi() ? static_cast<double>(Smi(this->ptr())->value())
                  : HeapNumber::unchecked_cast(*this)->value();
+}
+
+// static
+bool Object::SameNumberValue(double value1, double value2) {
+  // SameNumberValue(NaN, NaN) is true.
+  if (value1 != value2) {
+    return std::isnan(value1) && std::isnan(value2);
+  }
+  // SameNumberValue(0.0, -0.0) is false.
+  return (std::signbit(value1) == std::signbit(value2));
 }
 
 bool Object::IsNaN() const {
@@ -584,16 +600,8 @@ ObjectSlot HeapObject::RawField(int byte_offset) const {
   return ObjectSlot(FIELD_ADDR(*this, byte_offset));
 }
 
-ObjectSlot HeapObject::RawField(const HeapObject obj, int byte_offset) {
-  return ObjectSlot(FIELD_ADDR(obj, byte_offset));
-}
-
 MaybeObjectSlot HeapObject::RawMaybeWeakField(int byte_offset) const {
   return MaybeObjectSlot(FIELD_ADDR(*this, byte_offset));
-}
-
-MaybeObjectSlot HeapObject::RawMaybeWeakField(HeapObject obj, int byte_offset) {
-  return MaybeObjectSlot(FIELD_ADDR(obj, byte_offset));
 }
 
 MapWord MapWord::FromMap(const Map map) { return MapWord(map.ptr()); }
@@ -631,9 +639,7 @@ void HeapObject::VerifySmiField(int offset) {
 #endif
 
 ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
-  // TODO(v8:7464): When RO_SPACE is embedded, this will access a global
-  // variable instead.
-  return ReadOnlyRoots(GetHeapFromWritableObject(*this));
+  return ReadOnlyHeap::GetReadOnlyRoots(*this);
 }
 
 Map HeapObject::map() const { return map_word().ToMap(); }
@@ -745,21 +751,6 @@ bool Object::ToArrayIndex(uint32_t* index) const {
   return Object::ToUint32(index) && *index != kMaxUInt32;
 }
 
-bool Object::GetHeapObjectIfStrong(HeapObject* result) const {
-  return GetHeapObject(result);
-}
-
-bool Object::GetHeapObject(HeapObject* result) const {
-  if (!IsHeapObject()) return false;
-  *result = HeapObject::cast(*this);
-  return true;
-}
-
-HeapObject Object::GetHeapObject() const {
-  DCHECK(IsHeapObject());
-  return HeapObject::cast(*this);
-}
-
 int RegExpMatchInfo::NumberOfCaptureRegisters() {
   DCHECK_GE(length(), kLastMatchOverhead);
   Object obj = get(kNumberOfCapturesIndex);
@@ -807,6 +798,7 @@ WriteBarrierMode HeapObject::GetWriteBarrierMode(
   return GetWriteBarrierModeForObject(*this, &promise);
 }
 
+// static
 AllocationAlignment HeapObject::RequiredAlignment(Map map) {
 #ifdef V8_COMPRESS_POINTERS
   // TODO(ishell, v8:8875): Consider using aligned allocations once the

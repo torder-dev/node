@@ -30,7 +30,7 @@
 
 #include "src/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/compilation-cache.h"
 #include "src/compiler.h"
 #include "src/disasm.h"
@@ -82,7 +82,7 @@ static double Inc(Isolate* isolate, int x) {
   EmbeddedVector<char, 512> buffer;
   SNPrintF(buffer, source, x);
 
-  Handle<JSFunction> fun = Compile(buffer.start());
+  Handle<JSFunction> fun = Compile(buffer.begin());
   if (fun.is_null()) return -1;
 
   Handle<JSObject> global(isolate->context()->global_object(), isolate);
@@ -276,14 +276,14 @@ TEST(GetScriptLineNumber) {
   const int max_rows = 1000;
   const int buffer_size = max_rows + sizeof(function_f);
   ScopedVector<char> buffer(buffer_size);
-  memset(buffer.start(), '\n', buffer_size - 1);
+  memset(buffer.begin(), '\n', buffer_size - 1);
   buffer[buffer_size - 1] = '\0';
 
   for (int i = 0; i < max_rows; ++i) {
     if (i > 0)
       buffer[i - 1] = '\n';
     MemCopy(&buffer[i], function_f, sizeof(function_f) - 1);
-    v8::Local<v8::String> script_body = v8_str(buffer.start());
+    v8::Local<v8::String> script_body = v8_str(buffer.begin());
     v8::Script::Compile(context.local(), script_body, &origin)
         .ToLocalChecked()
         ->Run(context.local())
@@ -304,9 +304,11 @@ TEST(FeedbackVectorPreservedAcrossRecompiles) {
   v8::Local<v8::Context> context = CcTest::isolate()->GetCurrentContext();
 
   // Make sure function f has a call that uses a type feedback slot.
-  CompileRun("function fun() {};"
-             "fun1 = fun;"
-             "function f(a) { a(); } f(fun1);");
+  CompileRun(
+      "function fun() {};"
+      "fun1 = fun;"
+      "%PrepareFunctionForOptimization(f);"
+      "function f(a) { a(); } f(fun1);");
 
   Handle<JSFunction> f = Handle<JSFunction>::cast(
       v8::Utils::OpenHandle(*v8::Local<v8::Function>::Cast(
@@ -368,9 +370,9 @@ TEST(FeedbackVectorUnaffectedByScopeChanges) {
 
   CompileRun("morphing_call();");
 
-  // Now a feedback vector is allocated.
+  // Now a feedback vector / closure feedback cell array is allocated.
   CHECK(f->shared()->is_compiled());
-  CHECK(!f->feedback_vector()->is_empty());
+  CHECK(f->has_feedback_vector() || f->has_closure_feedback_cell_array());
 }
 
 // Test that optimized code for different closures is actually shared.
@@ -391,6 +393,7 @@ TEST(OptimizedCodeSharing1) {
         "var closure0 = MakeClosure();"
         "var closure1 = MakeClosure();"  // We only share optimized code
                                          // if there are at least two closures.
+        "%PrepareFunctionForOptimization(closure0);"
         "%DebugPrint(closure0());"
         "%OptimizeFunctionOnNextCall(closure0);"
         "%DebugPrint(closure0());"
@@ -667,17 +670,16 @@ TEST(CompileFunctionInContextScriptOrigin) {
 }
 
 void TestCompileFunctionInContextToStringImpl() {
-#define CHECK_NOT_CAUGHT(__local_context__, try_catch, __op__)                \
-  do {                                                                        \
-    const char* op = (__op__);                                                \
-    v8::Local<v8::Context> context = (__local_context__);                     \
-    if (try_catch.HasCaught()) {                                              \
-      v8::String::Utf8Value error(                                            \
-          CcTest::isolate(),                                                  \
-          try_catch.Exception()->ToString(context).ToLocalChecked());         \
-      V8_Fatal(__FILE__, __LINE__,                                            \
-               "Unexpected exception thrown during %s:\n\t%s\n", op, *error); \
-    }                                                                         \
+#define CHECK_NOT_CAUGHT(__local_context__, try_catch, __op__)             \
+  do {                                                                     \
+    const char* op = (__op__);                                             \
+    v8::Local<v8::Context> context = (__local_context__);                  \
+    if (try_catch.HasCaught()) {                                           \
+      v8::String::Utf8Value error(                                         \
+          CcTest::isolate(),                                               \
+          try_catch.Exception()->ToString(context).ToLocalChecked());      \
+      FATAL("Unexpected exception thrown during %s:\n\t%s\n", op, *error); \
+    }                                                                      \
   } while (false)
 
   {  // NOLINT
@@ -781,7 +783,9 @@ TEST(InvocationCount) {
 
   CompileRun(
       "function bar() {};"
+      "%EnsureFeedbackVectorForFunction(bar);"
       "function foo() { return bar(); };"
+      "%EnsureFeedbackVectorForFunction(foo);"
       "foo();");
   Handle<JSFunction> foo = Handle<JSFunction>::cast(GetGlobalProperty("foo"));
   CHECK_EQ(1, foo->feedback_vector()->invocation_count());
@@ -1008,6 +1012,7 @@ TEST(DecideToPretenureDuringCompilation) {
           "    foo(shouldKeep);"
           "  }"
           "}"
+          "%PrepareFunctionForOptimization(bar);"
           "bar();");
 
       // This number should be >= kPretenureRatio * 10000,
@@ -1031,7 +1036,9 @@ TEST(DecideToPretenureDuringCompilation) {
 
       // Check `bar` can get optimized again, meaning the compiler state is
       // recoverable from this point.
-      CompileRun("%OptimizeFunctionOnNextCall(bar);");
+      CompileRun(
+          "%PrepareFunctionForOptimization(bar);"
+          "%OptimizeFunctionOnNextCall(bar);");
       CompileRun("bar();");
 
       Handle<Object> foo_obj =

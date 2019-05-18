@@ -24,9 +24,10 @@ class Heap;
 class Isolate;
 class Map;
 class PropertyCell;
+class ReadOnlyHeap;
+class RootVisitor;
 class String;
 class Symbol;
-class RootVisitor;
 
 // Defines all the read-only roots in Heap.
 #define STRONG_READ_ONLY_ROOT_LIST(V)                                          \
@@ -60,6 +61,8 @@ class RootVisitor;
   V(Map, foreign_map, ForeignMap)                                              \
   V(Map, heap_number_map, HeapNumberMap)                                       \
   V(Map, transition_array_map, TransitionArrayMap)                             \
+  /* TODO(mythria): Once lazy feedback lands, check if feedback vector map */  \
+  /* is still a popular map */                                                 \
   V(Map, feedback_vector_map, FeedbackVectorMap)                               \
   V(ScopeInfo, empty_scope_info, EmptyScopeInfo)                               \
   V(FixedArray, empty_fixed_array, EmptyFixedArray)                            \
@@ -83,6 +86,7 @@ class RootVisitor;
   V(Map, debug_evaluate_context_map, DebugEvaluateContextMap)                  \
   V(Map, script_context_table_map, ScriptContextTableMap)                      \
   /* Maps */                                                                   \
+  V(Map, closure_feedback_cell_array_map, ClosureFeedbackCellArrayMap)         \
   V(Map, feedback_metadata_map, FeedbackMetadataArrayMap)                      \
   V(Map, array_list_map, ArrayListMap)                                         \
   V(Map, bigint_map, BigIntMap)                                                \
@@ -97,7 +101,6 @@ class RootVisitor;
   V(Map, mutable_heap_number_map, MutableHeapNumberMap)                        \
   V(Map, name_dictionary_map, NameDictionaryMap)                               \
   V(Map, no_closures_cell_map, NoClosuresCellMap)                              \
-  V(Map, no_feedback_cell_map, NoFeedbackCellMap)                              \
   V(Map, number_dictionary_map, NumberDictionaryMap)                           \
   V(Map, one_closure_cell_map, OneClosureCellMap)                              \
   V(Map, ordered_hash_map_map, OrderedHashMapMap)                              \
@@ -179,6 +182,8 @@ class RootVisitor;
     EmptyObjectBoilerplateDescription)                                         \
   V(ArrayBoilerplateDescription, empty_array_boilerplate_description,          \
     EmptyArrayBoilerplateDescription)                                          \
+  V(ClosureFeedbackCellArray, empty_closure_feedback_cell_array,               \
+    EmptyClosureFeedbackCellArray)                                             \
   V(FixedTypedArrayBase, empty_fixed_uint8_array, EmptyFixedUint8Array)        \
   V(FixedTypedArrayBase, empty_fixed_int8_array, EmptyFixedInt8Array)          \
   V(FixedTypedArrayBase, empty_fixed_uint16_array, EmptyFixedUint16Array)      \
@@ -211,9 +216,13 @@ class RootVisitor;
   V(HeapNumber, minus_infinity_value, MinusInfinityValue)                      \
   /* Marker for self-references during code-generation */                      \
   V(HeapObject, self_reference_marker, SelfReferenceMarker)                    \
-  /* Canonical trampoline RelocInfo */                                         \
+  /* Canonical off-heap trampoline data */                                     \
   V(ByteArray, off_heap_trampoline_relocation_info,                            \
     OffHeapTrampolineRelocationInfo)                                           \
+  V(CodeDataContainer, trampoline_trivial_code_data_container,                 \
+    TrampolineTrivialCodeDataContainer)                                        \
+  V(CodeDataContainer, trampoline_promise_rejection_code_data_container,       \
+    TrampolinePromiseRejectionCodeDataContainer)                               \
   /* Hash seed */                                                              \
   V(ByteArray, hash_seed, HashSeed)
 
@@ -227,7 +236,6 @@ class RootVisitor;
   /* Canonical empty values */                                               \
   V(Script, empty_script, EmptyScript)                                       \
   V(FeedbackCell, many_closures_cell, ManyClosuresCell)                      \
-  V(FeedbackCell, no_feedback_cell, NoFeedbackCell)                          \
   V(Cell, invalid_prototype_validity_cell, InvalidPrototypeValidityCell)     \
   /* Protectors */                                                           \
   V(Cell, array_constructor_protector, ArrayConstructorProtector)            \
@@ -499,12 +507,16 @@ class RootsTable {
   friend class Isolate;
   friend class Heap;
   friend class Factory;
+  friend class ReadOnlyHeap;
   friend class ReadOnlyRoots;
   friend class RootsSerializer;
 };
 
 class ReadOnlyRoots {
  public:
+  static constexpr size_t kEntriesCount =
+      static_cast<size_t>(RootIndex::kReadOnlyRootsCount);
+
   V8_INLINE explicit ReadOnlyRoots(Heap* heap);
   V8_INLINE explicit ReadOnlyRoots(Isolate* isolate);
 
@@ -530,7 +542,13 @@ class ReadOnlyRoots {
 #endif
 
  private:
-  RootsTable& roots_table_;
+  V8_INLINE explicit ReadOnlyRoots(Address* ro_roots);
+
+  V8_INLINE Address& at(RootIndex root_index) const;
+
+  Address* read_only_roots_;
+
+  friend class ReadOnlyHeap;
 };
 
 }  // namespace internal

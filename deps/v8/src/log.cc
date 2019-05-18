@@ -8,13 +8,13 @@
 #include <memory>
 #include <sstream>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/bailout-reason.h"
 #include "src/base/platform/platform.h"
-#include "src/bootstrapper.h"
 #include "src/counters.h"
 #include "src/deoptimizer.h"
 #include "src/global-handles.h"
+#include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
 #include "src/isolate.h"
@@ -140,7 +140,9 @@ class CodeEventLogger::NameBuffer {
   }
 
   void AppendBytes(const char* bytes) {
-    AppendBytes(bytes, StrLength(bytes));
+    size_t len = strlen(bytes);
+    DCHECK_GE(kMaxInt, len);
+    AppendBytes(bytes, static_cast<int>(len));
   }
 
   void AppendByte(char c) {
@@ -234,10 +236,10 @@ void CodeEventLogger::CodeCreateEvent(LogEventsAndTags tag,
                                       const wasm::WasmCode* code,
                                       wasm::WasmName name) {
   name_buffer_->Init(tag);
-  if (name.is_empty()) {
+  if (name.empty()) {
     name_buffer_->AppendBytes("<wasm-unknown>");
   } else {
-    name_buffer_->AppendBytes(name.start(), name.length());
+    name_buffer_->AppendBytes(name.begin(), name.length());
   }
   name_buffer_->AppendByte('-');
   if (code->IsAnonymous()) {
@@ -295,7 +297,7 @@ PerfBasicLogger::PerfBasicLogger(Isolate* isolate)
       base::OS::GetCurrentProcessId());
   CHECK_NE(size, -1);
   perf_output_handle_ =
-      base::OS::FOpen(perf_dump_name.start(), base::OS::LogFileOpenMode);
+      base::OS::FOpen(perf_dump_name.begin(), base::OS::LogFileOpenMode);
   CHECK_NOT_NULL(perf_output_handle_);
   setvbuf(perf_output_handle_, nullptr, _IOLBF, 0);
 }
@@ -542,10 +544,10 @@ LowLevelLogger::LowLevelLogger(Isolate* isolate, const char* name)
   // Open the low-level log file.
   size_t len = strlen(name);
   ScopedVector<char> ll_name(static_cast<int>(len + sizeof(kLogExt)));
-  MemCopy(ll_name.start(), name, len);
-  MemCopy(ll_name.start() + len, kLogExt, sizeof(kLogExt));
+  MemCopy(ll_name.begin(), name, len);
+  MemCopy(ll_name.begin() + len, kLogExt, sizeof(kLogExt));
   ll_output_handle_ =
-      base::OS::FOpen(ll_name.start(), base::OS::LogFileOpenMode);
+      base::OS::FOpen(ll_name.begin(), base::OS::LogFileOpenMode);
   setvbuf(ll_output_handle_, nullptr, _IOLBF, 0);
 
   LogCodeInfo();
@@ -677,7 +679,7 @@ void JitLogger::LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
   memset(static_cast<void*>(&event), 0, sizeof(event));
   event.type = JitCodeEvent::CODE_ADDED;
   event.code_type = JitCodeEvent::JIT_CODE;
-  event.code_start = code->instructions().start();
+  event.code_start = code->instructions().begin();
   event.code_len = code->instructions().length();
   event.name.str = name;
   event.name.len = length;
@@ -1079,6 +1081,12 @@ void Logger::LeaveExternal(Isolate* isolate) {
   isolate->set_current_vm_state(JS);
 }
 
+bool Logger::is_logging() {
+  // Disable logging while the CPU profiler is running.
+  if (isolate_->is_profiling()) return false;
+  return is_logging_;
+}
+
 // Instantiate template methods.
 #define V(TimerName, expose)                                           \
   template void TimerEventScope<TimerEvent##TimerName>::LogTimerEvent( \
@@ -1226,9 +1234,9 @@ void Logger::CodeCreateEvent(CodeEventListener::LogEventsAndTags tag,
   if (!FLAG_log_code || !log_->IsEnabled()) return;
   Log::MessageBuilder msg(log_);
   AppendCodeCreateHeader(msg, tag, AbstractCode::Kind::WASM_FUNCTION,
-                         code->instructions().start(),
+                         code->instructions().begin(),
                          code->instructions().length(), &timer_);
-  if (name.is_empty()) {
+  if (name.empty()) {
     msg << "<unknown wasm>";
   } else {
     msg.AppendString(name);
@@ -1590,7 +1598,7 @@ void Logger::RuntimeCallTimerEvent() {
 
 void Logger::TickEvent(v8::TickSample* sample, bool overflow) {
   if (!log_->IsEnabled() || !FLAG_prof_cpp) return;
-  if (V8_UNLIKELY(FLAG_runtime_stats ==
+  if (V8_UNLIKELY(TracingFlags::runtime_stats.load(std::memory_order_relaxed) ==
                   v8::tracing::TracingCategoryObserver::ENABLED_BY_NATIVE)) {
     RuntimeCallTimerEvent();
   }
@@ -1663,7 +1671,7 @@ void Logger::MapEvent(const char* type, Map from, Map to, const char* reason,
       SharedFunctionInfo sfi = SharedFunctionInfo::cast(name_or_sfi);
       msg << sfi->DebugName();
 #if V8_SFI_HAS_UNIQUE_ID
-      msg << " " << SharedFunctionInfoWithID::cast(sfi)->unique_id();
+      msg << " " << sfi->unique_id();
 #endif  // V8_SFI_HAS_UNIQUE_ID
     }
   }
@@ -1930,7 +1938,9 @@ void Logger::SetCodeEventHandler(uint32_t options,
   }
 
   if (event_handler) {
-    isolate_->wasm_engine()->EnableCodeLogging(isolate_);
+    if (isolate_->wasm_engine() != nullptr) {
+      isolate_->wasm_engine()->EnableCodeLogging(isolate_);
+    }
     jit_logger_.reset(new JitLogger(isolate_, event_handler));
     AddCodeEventListener(jit_logger_.get());
     if (options & kJitCodeEventEnumExisting) {
@@ -2018,6 +2028,10 @@ void ExistingCodeLogger::LogCodeObject(Object object) {
       description = "A JavaScript to Wasm adapter";
       tag = CodeEventListener::STUB_TAG;
       break;
+    case AbstractCode::WASM_TO_CAPI_FUNCTION:
+      description = "A Wasm to C-API adapter";
+      tag = CodeEventListener::STUB_TAG;
+      break;
     case AbstractCode::WASM_TO_JS_FUNCTION:
       description = "A Wasm to JavaScript adapter";
       tag = CodeEventListener::STUB_TAG;
@@ -2054,11 +2068,12 @@ void ExistingCodeLogger::LogCompiledFunctions() {
       EnumerateCompiledFunctions(heap, nullptr, nullptr);
   ScopedVector<Handle<SharedFunctionInfo>> sfis(compiled_funcs_count);
   ScopedVector<Handle<AbstractCode>> code_objects(compiled_funcs_count);
-  EnumerateCompiledFunctions(heap, sfis.start(), code_objects.start());
+  EnumerateCompiledFunctions(heap, sfis.begin(), code_objects.begin());
 
   // During iteration, there can be heap allocation due to
   // GetScriptLineNumber call.
   for (int i = 0; i < compiled_funcs_count; ++i) {
+    SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate_, sfis[i]);
     if (sfis[i]->function_data()->IsInterpreterData()) {
       LogExistingFunction(
           sfis[i],

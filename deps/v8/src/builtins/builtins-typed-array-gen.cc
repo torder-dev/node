@@ -10,7 +10,7 @@
 #include "src/builtins/growable-fixed-array-gen.h"
 #include "src/handles-inl.h"
 #include "src/heap/factory-inl.h"
-#include "torque-generated/builtins-typed-array-createtypedarray-from-dsl-gen.h"
+#include "torque-generated/builtins-typed-array-createtypedarray-gen-tq.h"
 
 namespace v8 {
 namespace internal {
@@ -51,11 +51,11 @@ TNode<Map> TypedArrayBuiltinsAssembler::LoadMapForType(
 //  - Set the byte_length.
 //  - Set EmbedderFields to 0.
 void TypedArrayBuiltinsAssembler::SetupTypedArray(TNode<JSTypedArray> holder,
-                                                  TNode<Smi> length,
+                                                  TNode<UintPtrT> length,
                                                   TNode<UintPtrT> byte_offset,
                                                   TNode<UintPtrT> byte_length) {
-  CSA_ASSERT(this, TaggedIsPositiveSmi(length));
-  StoreObjectField(holder, JSTypedArray::kLengthOffset, length);
+  StoreObjectFieldNoWriteBarrier(holder, JSTypedArray::kLengthOffset, length,
+                                 MachineType::PointerRepresentation());
   StoreObjectFieldNoWriteBarrier(holder, JSArrayBufferView::kByteOffsetOffset,
                                  byte_offset,
                                  MachineType::PointerRepresentation());
@@ -127,7 +127,7 @@ TNode<FixedTypedArrayBase> TypedArrayBuiltinsAssembler::AllocateOnHeapElements(
   // pointer.
   CSA_ASSERT(this, IsRegularHeapObjectSize(total_size));
 
-  TNode<Object> elements;
+  TNode<HeapObject> elements;
 
   if (UnalignedLoadSupported(MachineRepresentation::kFloat64) &&
       UnalignedStoreSupported(MachineRepresentation::kFloat64)) {
@@ -136,9 +136,13 @@ TNode<FixedTypedArrayBase> TypedArrayBuiltinsAssembler::AllocateOnHeapElements(
     elements = AllocateInNewSpace(total_size, kDoubleAlignment);
   }
 
-  StoreMapNoWriteBarrier(elements, map);
-  StoreObjectFieldNoWriteBarrier(elements, FixedArray::kLengthOffset, length);
-  StoreObjectFieldNoWriteBarrier(
+  // These skipped write barriers are marked unsafe because the MemoryOptimizer
+  // currently doesn't handle double alignment, so it fails at verifying them.
+  UnsafeStoreObjectFieldNoWriteBarrier(elements,
+                                       FixedTypedArrayBase::kMapOffset, map);
+  UnsafeStoreObjectFieldNoWriteBarrier(
+      elements, FixedTypedArrayBase::kLengthOffset, length);
+  UnsafeStoreObjectFieldNoWriteBarrier(
       elements, FixedTypedArrayBase::kBasePointerOffset, elements);
   StoreObjectFieldNoWriteBarrier(
       elements, FixedTypedArrayBase::kExternalPointerOffset,
@@ -238,10 +242,10 @@ TF_BUILTIN(TypedArrayPrototypeLength, TypedArrayBuiltinsAssembler) {
   // Default to zero if the {receiver}s buffer was detached.
   TNode<JSArrayBuffer> receiver_buffer =
       LoadJSArrayBufferViewBuffer(CAST(receiver));
-  TNode<Smi> length = Select<Smi>(
-      IsDetachedBuffer(receiver_buffer), [=] { return SmiConstant(0); },
+  TNode<UintPtrT> length = Select<UintPtrT>(
+      IsDetachedBuffer(receiver_buffer), [=] { return UintPtrConstant(0); },
       [=] { return LoadJSTypedArrayLength(CAST(receiver)); });
-  Return(length);
+  Return(ChangeUintPtrToTagged(length));
 }
 
 TNode<Word32T> TypedArrayBuiltinsAssembler::IsUint8ElementsKind(
@@ -269,7 +273,7 @@ TNode<IntPtrT> TypedArrayBuiltinsAssembler::GetTypedArrayElementSize(
   return element_size.value();
 }
 
-TypedArrayBuiltinsFromDSLAssembler::TypedArrayElementsInfo
+TorqueGeneratedTypedArrayBuiltinsAssembler::TypedArrayElementsInfo
 TypedArrayBuiltinsAssembler::GetTypedArrayElementsInfo(
     TNode<JSTypedArray> typed_array) {
   TNode<Int32T> elements_kind = LoadElementsKind(typed_array);
@@ -287,7 +291,7 @@ TypedArrayBuiltinsAssembler::GetTypedArrayElementsInfo(
         var_map = HeapConstant(map);
       });
 
-  return TypedArrayBuiltinsFromDSLAssembler::TypedArrayElementsInfo{
+  return TorqueGeneratedTypedArrayBuiltinsAssembler::TypedArrayElementsInfo{
       var_size_log2.value(), var_map.value(), elements_kind};
 }
 
@@ -328,8 +332,9 @@ void TypedArrayBuiltinsAssembler::ThrowIfLengthLessThan(
     TNode<Smi> min_length) {
   // If typed_array.[[ArrayLength]] < min_length, throw a TypeError exception.
   Label if_length_is_not_short(this);
-  TNode<Smi> new_length = LoadJSTypedArrayLength(typed_array);
-  GotoIfNot(SmiLessThan(new_length, min_length), &if_length_is_not_short);
+  TNode<UintPtrT> new_length = LoadJSTypedArrayLength(typed_array);
+  GotoIfNot(UintPtrLessThan(new_length, SmiUntag(min_length)),
+            &if_length_is_not_short);
   ThrowTypeError(context, MessageTemplate::kTypedArrayTooShort);
 
   BIND(&if_length_is_not_short);
@@ -383,8 +388,8 @@ void TypedArrayBuiltinsAssembler::SetTypedArraySource(
 
   // Check for possible range errors.
 
-  TNode<IntPtrT> source_length = SmiUntag(LoadJSTypedArrayLength(source));
-  TNode<IntPtrT> target_length = SmiUntag(LoadJSTypedArrayLength(target));
+  TNode<IntPtrT> source_length = Signed(LoadJSTypedArrayLength(source));
+  TNode<IntPtrT> target_length = Signed(LoadJSTypedArrayLength(target));
   TNode<IntPtrT> required_target_length = IntPtrAdd(source_length, offset);
 
   GotoIf(IntPtrGreaterThan(required_target_length, target_length),
@@ -434,7 +439,7 @@ void TypedArrayBuiltinsAssembler::SetTypedArraySource(
                           IsBigInt64ElementsKind(target_el_kind)),
            &exception);
 
-    TNode<IntPtrT> source_length = SmiUntag(LoadJSTypedArrayLength(source));
+    TNode<IntPtrT> source_length = Signed(LoadJSTypedArrayLength(source));
     CallCCopyTypedArrayElementsToTypedArray(source, target, source_length,
                                             offset);
     Goto(&out);
@@ -455,7 +460,7 @@ void TypedArrayBuiltinsAssembler::SetJSArraySource(
              IntPtrLessThanOrEqual(offset, IntPtrConstant(Smi::kMaxValue)));
 
   TNode<IntPtrT> source_length = SmiUntag(LoadFastJSArrayLength(source));
-  TNode<IntPtrT> target_length = SmiUntag(LoadJSTypedArrayLength(target));
+  TNode<IntPtrT> target_length = Signed(LoadJSTypedArrayLength(target));
 
   // Maybe out of bounds?
   GotoIf(IntPtrGreaterThan(IntPtrAdd(source_length, offset), target_length),
@@ -495,9 +500,10 @@ void TypedArrayBuiltinsAssembler::CallCMemmove(TNode<RawPtrT> dest_ptr,
                                                TNode<UintPtrT> byte_length) {
   TNode<ExternalReference> memmove =
       ExternalConstant(ExternalReference::libc_memmove_function());
-  CallCFunction3(MachineType::AnyTagged(), MachineType::Pointer(),
-                 MachineType::Pointer(), MachineType::UintPtr(), memmove,
-                 dest_ptr, src_ptr, byte_length);
+  CallCFunction(memmove, MachineType::AnyTagged(),
+                std::make_pair(MachineType::Pointer(), dest_ptr),
+                std::make_pair(MachineType::Pointer(), src_ptr),
+                std::make_pair(MachineType::UintPtr(), byte_length));
 }
 
 void TypedArrayBuiltinsAssembler::CallCMemcpy(TNode<RawPtrT> dest_ptr,
@@ -505,9 +511,10 @@ void TypedArrayBuiltinsAssembler::CallCMemcpy(TNode<RawPtrT> dest_ptr,
                                               TNode<UintPtrT> byte_length) {
   TNode<ExternalReference> memcpy =
       ExternalConstant(ExternalReference::libc_memcpy_function());
-  CallCFunction3(MachineType::AnyTagged(), MachineType::Pointer(),
-                 MachineType::Pointer(), MachineType::UintPtr(), memcpy,
-                 dest_ptr, src_ptr, byte_length);
+  CallCFunction(memcpy, MachineType::AnyTagged(),
+                std::make_pair(MachineType::Pointer(), dest_ptr),
+                std::make_pair(MachineType::Pointer(), src_ptr),
+                std::make_pair(MachineType::UintPtr(), byte_length));
 }
 
 void TypedArrayBuiltinsAssembler::CallCMemset(TNode<RawPtrT> dest_ptr,
@@ -515,9 +522,10 @@ void TypedArrayBuiltinsAssembler::CallCMemset(TNode<RawPtrT> dest_ptr,
                                               TNode<UintPtrT> length) {
   TNode<ExternalReference> memset =
       ExternalConstant(ExternalReference::libc_memset_function());
-  CallCFunction3(MachineType::AnyTagged(), MachineType::Pointer(),
-                 MachineType::IntPtr(), MachineType::UintPtr(), memset,
-                 dest_ptr, value, length);
+  CallCFunction(memset, MachineType::AnyTagged(),
+                std::make_pair(MachineType::Pointer(), dest_ptr),
+                std::make_pair(MachineType::IntPtr(), value),
+                std::make_pair(MachineType::UintPtr(), length));
 }
 
 void TypedArrayBuiltinsAssembler::
@@ -530,10 +538,12 @@ void TypedArrayBuiltinsAssembler::
              Word32BinaryNot(IsBigInt64ElementsKind(LoadElementsKind(dest))));
   TNode<ExternalReference> f = ExternalConstant(
       ExternalReference::copy_fast_number_jsarray_elements_to_typed_array());
-  CallCFunction5(MachineType::AnyTagged(), MachineType::AnyTagged(),
-                 MachineType::AnyTagged(), MachineType::AnyTagged(),
-                 MachineType::UintPtr(), MachineType::UintPtr(), f, context,
-                 source, dest, source_length, offset);
+  CallCFunction(f, MachineType::AnyTagged(),
+                std::make_pair(MachineType::AnyTagged(), context),
+                std::make_pair(MachineType::AnyTagged(), source),
+                std::make_pair(MachineType::AnyTagged(), dest),
+                std::make_pair(MachineType::UintPtr(), source_length),
+                std::make_pair(MachineType::UintPtr(), offset));
 }
 
 void TypedArrayBuiltinsAssembler::CallCCopyTypedArrayElementsToTypedArray(
@@ -541,10 +551,11 @@ void TypedArrayBuiltinsAssembler::CallCCopyTypedArrayElementsToTypedArray(
     TNode<IntPtrT> source_length, TNode<IntPtrT> offset) {
   TNode<ExternalReference> f = ExternalConstant(
       ExternalReference::copy_typed_array_elements_to_typed_array());
-  CallCFunction4(MachineType::AnyTagged(), MachineType::AnyTagged(),
-                 MachineType::AnyTagged(), MachineType::UintPtr(),
-                 MachineType::UintPtr(), f, source, dest, source_length,
-                 offset);
+  CallCFunction(f, MachineType::AnyTagged(),
+                std::make_pair(MachineType::AnyTagged(), source),
+                std::make_pair(MachineType::AnyTagged(), dest),
+                std::make_pair(MachineType::UintPtr(), source_length),
+                std::make_pair(MachineType::UintPtr(), offset));
 }
 
 void TypedArrayBuiltinsAssembler::CallCCopyTypedArrayElementsSlice(
@@ -552,9 +563,11 @@ void TypedArrayBuiltinsAssembler::CallCCopyTypedArrayElementsSlice(
     TNode<IntPtrT> end) {
   TNode<ExternalReference> f =
       ExternalConstant(ExternalReference::copy_typed_array_elements_slice());
-  CallCFunction4(MachineType::AnyTagged(), MachineType::AnyTagged(),
-                 MachineType::AnyTagged(), MachineType::UintPtr(),
-                 MachineType::UintPtr(), f, source, dest, start, end);
+  CallCFunction(f, MachineType::AnyTagged(),
+                std::make_pair(MachineType::AnyTagged(), source),
+                std::make_pair(MachineType::AnyTagged(), dest),
+                std::make_pair(MachineType::UintPtr(), start),
+                std::make_pair(MachineType::UintPtr(), end));
 }
 
 void TypedArrayBuiltinsAssembler::DispatchTypedArrayByElementsKind(
@@ -948,7 +961,8 @@ TF_BUILTIN(TypedArrayFrom, TypedArrayBuiltinsAssembler) {
     // Source is a TypedArray with unmodified iterator behavior. Use the
     // source object directly, taking advantage of the special-case code in
     // TypedArrayCopyElements
-    final_length = LoadJSTypedArrayLength(CAST(source));
+    // TODO(v8:4153): This needs to be handle to huge TypedArrays.
+    final_length = SmiTag(Signed(LoadJSTypedArrayLength(CAST(source))));
     final_source = source;
     Goto(&create_typed_array);
   }

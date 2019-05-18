@@ -28,9 +28,12 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
                                                     Label* if_true,
                                                     Label* if_false);
 
- protected:
-  TNode<JSArray> StringToList(TNode<Context> context, TNode<String> string);
+  TNode<Int32T> LoadSurrogatePairAt(SloppyTNode<String> string,
+                                    SloppyTNode<IntPtrT> length,
+                                    SloppyTNode<IntPtrT> index,
+                                    UnicodeEncoding encoding);
 
+ protected:
   void StringEqual_Loop(Node* lhs, Node* lhs_instance_type,
                         MachineType lhs_type, Node* rhs,
                         Node* rhs_instance_type, MachineType rhs_type,
@@ -59,23 +62,14 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
   void GenerateStringRelationalComparison(Node* context, Node* left,
                                           Node* right, Operation op);
 
-  TNode<Smi> ToSmiBetweenZeroAnd(SloppyTNode<Context> context,
-                                 SloppyTNode<Object> value,
-                                 SloppyTNode<Smi> limit);
-
   typedef std::function<TNode<Object>(
       TNode<String> receiver, TNode<IntPtrT> length, TNode<IntPtrT> index)>
       StringAtAccessor;
 
   void GenerateStringAt(const char* method_name, TNode<Context> context,
-                        Node* receiver, TNode<Object> maybe_position,
+                        TNode<Object> receiver, TNode<Object> maybe_position,
                         TNode<Object> default_return,
                         const StringAtAccessor& accessor);
-
-  TNode<Int32T> LoadSurrogatePairAt(SloppyTNode<String> string,
-                                    SloppyTNode<IntPtrT> length,
-                                    SloppyTNode<IntPtrT> index,
-                                    UnicodeEncoding encoding);
 
   void StringIndexOf(Node* const subject_string, Node* const search_string,
                      Node* const position,
@@ -134,8 +128,8 @@ class StringTrimAssembler : public StringBuiltinsAssembler {
   explicit StringTrimAssembler(compiler::CodeAssemblerState* state)
       : StringBuiltinsAssembler(state) {}
 
-  void GotoIfNotWhiteSpaceOrLineTerminator(Node* const char_code,
-                                           Label* const if_not_whitespace);
+  V8_EXPORT_PRIVATE void GotoIfNotWhiteSpaceOrLineTerminator(
+      Node* const char_code, Label* const if_not_whitespace);
 
  protected:
   void Generate(String::TrimMode mode, const char* method, TNode<IntPtrT> argc,

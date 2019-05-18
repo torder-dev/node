@@ -72,7 +72,28 @@ class Declarable {
   }
   virtual const char* type_name() const { return "<<unknown>>"; }
   Scope* ParentScope() const { return parent_scope_; }
-  const SourcePosition& pos() const { return pos_; }
+
+  // The SourcePosition of the whole declarable. For example, for a macro
+  // this will encompass not only the signature, but also the body.
+  SourcePosition Position() const { return position_; }
+  void SetPosition(const SourcePosition& position) { position_ = position; }
+
+  // The SourcePosition of the identifying name of the declarable. For example,
+  // for a macro this will be the SourcePosition of the name.
+  // Note that this SourcePosition might not make sense for all kinds of
+  // declarables, in that case, the default SourcePosition is returned.
+  SourcePosition IdentifierPosition() const {
+    return identifier_position_.source.IsValid() ? identifier_position_
+                                                 : position_;
+  }
+  void SetIdentifierPosition(const SourcePosition& position) {
+    identifier_position_ = position;
+  }
+
+  bool IsUserDefined() const { return is_user_defined_; }
+  void SetIsUserDefined(bool is_user_defined) {
+    is_user_defined_ = is_user_defined;
+  }
 
  protected:
   explicit Declarable(Kind kind) : kind_(kind) {}
@@ -80,7 +101,9 @@ class Declarable {
  private:
   const Kind kind_;
   Scope* const parent_scope_ = CurrentScope::Get();
-  SourcePosition pos_ = CurrentSourcePosition::Get();
+  SourcePosition position_ = CurrentSourcePosition::Get();
+  SourcePosition identifier_position_ = SourcePosition::Invalid();
+  bool is_user_defined_ = true;
 };
 
 #define DECLARE_DECLARABLE_BOILERPLATE(x, y)                  \
@@ -156,7 +179,7 @@ class Namespace : public Scope {
       : Scope(Declarable::kNamespace), name_(name) {}
   const std::string& name() const { return name_; }
   std::string ExternalName() const {
-    return CamelifyString(name()) + "BuiltinsFromDSLAssembler";
+    return "TorqueGenerated" + CamelifyString(name()) + "BuiltinsAssembler";
   }
   bool IsDefaultNamespace() const;
   bool IsTestNamespace() const;
@@ -288,6 +311,9 @@ class Macro : public Callable {
         if (type->IsStructType()) return true;
       }
     }
+    // Intrinsics that are used internally in Torque and implemented as torque
+    // code should be inlined and not generate C++ definitions.
+    if (ReadableName()[0] == '%') return true;
     return Callable::ShouldBeInlined();
   }
 
@@ -299,10 +325,11 @@ class Macro : public Callable {
   Macro(Declarable::Kind kind, std::string external_name,
         std::string readable_name, std::string external_assembler_name,
         const Signature& signature, bool transitioning,
-        base::Optional<Statement*> body)
+        base::Optional<Statement*> body, bool is_user_defined)
       : Callable(kind, std::move(external_name), std::move(readable_name),
                  signature, transitioning, body),
         external_assembler_name_(std::move(external_assembler_name)) {
+    SetIsUserDefined(is_user_defined);
     if (signature.parameter_types.var_args) {
       ReportError("Varargs are not supported for macros.");
     }
@@ -312,10 +339,11 @@ class Macro : public Callable {
   friend class Declarations;
   Macro(std::string external_name, std::string readable_name,
         std::string external_assembler_name, const Signature& signature,
-        bool transitioning, base::Optional<Statement*> body)
+        bool transitioning, base::Optional<Statement*> body,
+        bool is_user_defined)
       : Macro(Declarable::kMacro, std::move(external_name),
               std::move(readable_name), external_assembler_name, signature,
-              transitioning, body) {}
+              transitioning, body, is_user_defined) {}
 
   std::string external_assembler_name_;
 };
@@ -338,7 +366,7 @@ class Method : public Macro {
          const Signature& signature, bool transitioning, Statement* body)
       : Macro(Declarable::kMethod, std::move(external_name),
               std::move(readable_name), std::move(external_assembler_name),
-              signature, transitioning, body),
+              signature, transitioning, body, true),
         aggregate_type_(aggregate_type) {}
   AggregateType* aggregate_type_;
 };
@@ -421,8 +449,6 @@ class Generic : public Declarable {
       : Declarable(Declarable::kGeneric),
         name_(name),
         declaration_(declaration) {}
-  base::Optional<const Type*> InferTypeArgument(size_t i,
-                                                const TypeVector& arguments);
 
   std::string name_;
   std::unordered_map<TypeVector, Callable*, base::hash<TypeVector>>
@@ -439,7 +465,11 @@ class TypeAlias : public Declarable {
  public:
   DECLARE_DECLARABLE_BOILERPLATE(TypeAlias, type_alias)
 
-  const Type* type() const { return type_; }
+  const Type* type() const {
+    if (type_) return *type_;
+    return Resolve();
+  }
+  const Type* Resolve() const;
   bool IsRedeclaration() const { return redeclaration_; }
   SourcePosition GetDeclarationPosition() const {
     return declaration_position_;
@@ -447,6 +477,8 @@ class TypeAlias : public Declarable {
 
  private:
   friend class Declarations;
+  friend class TypeVisitor;
+
   explicit TypeAlias(
       const Type* type, bool redeclaration,
       SourcePosition declaration_position = SourcePosition::Invalid())
@@ -454,8 +486,17 @@ class TypeAlias : public Declarable {
         type_(type),
         redeclaration_(redeclaration),
         declaration_position_(declaration_position) {}
+  explicit TypeAlias(
+      TypeDeclaration* type, bool redeclaration,
+      SourcePosition declaration_position = SourcePosition::Invalid())
+      : Declarable(Declarable::kTypeAlias),
+        delayed_(type),
+        redeclaration_(redeclaration),
+        declaration_position_(declaration_position) {}
 
-  const Type* type_;
+  mutable bool being_resolved_ = false;
+  mutable base::Optional<TypeDeclaration*> delayed_;
+  mutable base::Optional<const Type*> type_;
   bool redeclaration_;
   const SourcePosition declaration_position_;
 };

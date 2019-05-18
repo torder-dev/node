@@ -77,11 +77,7 @@ void* JSArrayBuffer::allocation_base() const {
 }
 
 bool JSArrayBuffer::is_wasm_memory() const {
-  bool const is_wasm_memory = IsWasmMemoryBit::decode(bit_field());
-  DCHECK_EQ(is_wasm_memory,
-            GetIsolate()->wasm_engine()->memory_tracker()->IsWasmMemory(
-                backing_store()));
-  return is_wasm_memory;
+  return IsWasmMemoryBit::decode(bit_field());
 }
 
 void JSArrayBuffer::set_is_wasm_memory(bool is_wasm_memory) {
@@ -113,8 +109,6 @@ BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, was_detached,
                     JSArrayBuffer::WasDetachedBit)
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_shared,
                     JSArrayBuffer::IsSharedBit)
-BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_growable,
-                    JSArrayBuffer::IsGrowableBit)
 
 size_t JSArrayBufferView::byte_offset() const {
   return READ_UINTPTR_FIELD(*this, kByteOffsetOffset);
@@ -138,20 +132,12 @@ bool JSArrayBufferView::WasDetached() const {
   return JSArrayBuffer::cast(buffer())->was_detached();
 }
 
-Object JSTypedArray::length() const { return READ_FIELD(*this, kLengthOffset); }
-
-size_t JSTypedArray::length_value() const {
-  double val = length()->Number();
-  DCHECK_LE(val, kMaxSafeInteger);   // 2^53-1
-  DCHECK_GE(val, -kMaxSafeInteger);  // -2^53+1
-  DCHECK_LE(val, std::numeric_limits<size_t>::max());
-  DCHECK_GE(val, std::numeric_limits<size_t>::min());
-  return static_cast<size_t>(val);
+size_t JSTypedArray::length() const {
+  return READ_UINTPTR_FIELD(*this, kLengthOffset);
 }
 
-void JSTypedArray::set_length(Object value, WriteBarrierMode mode) {
-  WRITE_FIELD(*this, kLengthOffset, value);
-  CONDITIONAL_WRITE_BARRIER(*this, kLengthOffset, value, mode);
+void JSTypedArray::set_length(size_t value) {
+  WRITE_UINTPTR_FIELD(*this, kLengthOffset, value);
 }
 
 bool JSTypedArray::is_on_heap() const {
@@ -184,9 +170,15 @@ MaybeHandle<JSTypedArray> JSTypedArray::Validate(Isolate* isolate,
   return array;
 }
 
-#ifdef VERIFY_HEAP
-ACCESSORS(JSTypedArray, raw_length, Object, kLengthOffset)
-#endif
+void* JSDataView::data_pointer() const {
+  intptr_t ptr = READ_INTPTR_FIELD(*this, kDataPointerOffset);
+  return reinterpret_cast<void*>(ptr);
+}
+
+void JSDataView::set_data_pointer(void* value) {
+  intptr_t ptr = reinterpret_cast<intptr_t>(value);
+  WRITE_INTPTR_FIELD(*this, kDataPointerOffset, ptr);
+}
 
 }  // namespace internal
 }  // namespace v8

@@ -47,6 +47,9 @@
 #include "src/x64/constants-x64.h"
 #include "src/x64/register-x64.h"
 #include "src/x64/sse-instr.h"
+#if defined(V8_OS_WIN_X64)
+#include "src/unwinding-info-win64.h"
+#endif
 
 namespace v8 {
 namespace internal {
@@ -362,10 +365,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       Address pc, Address constant_pool, Address target,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
-  // Return the code target address at a call site from the return address
-  // of that call in the instruction stream.
-  static inline Address target_address_from_return_address(Address pc);
-
   // This sets the branch destination (which is in the instruction on x64).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
@@ -381,13 +380,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   inline Handle<Code> code_target_object_handle_at(Address pc);
+  inline Handle<HeapObject> compressed_embedded_object_handle_at(Address pc);
   inline Address runtime_entry_at(Address pc);
 
   // Number of bytes taken up by the branch target in the code.
   static constexpr int kSpecialTargetSize = 4;  // 32-bit displacement.
-  // Distance between the address of the code target in the call instruction
-  // and the return address pushed on the stack.
-  static constexpr int kCallTargetAddressOffset = 4;  // 32-bit displacement.
 
   // One byte opcode for test eax,0xXXXXXXXX.
   static constexpr byte kTestEaxByte = 0xA9;
@@ -730,8 +727,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Call near relative 32-bit displacement, relative to next instruction.
   void call(Label* L);
   void call(Address entry, RelocInfo::Mode rmode);
-  void near_call(Address entry, RelocInfo::Mode rmode);
-  void near_jmp(Address entry, RelocInfo::Mode rmode);
+
+  // Explicitly emit a near call / near jump. The displacement is relative to
+  // the next instructions (which starts at {pc_offset() + kNearJmpInstrSize}).
+  static constexpr int kNearJmpInstrSize = 5;
+  void near_call(intptr_t disp, RelocInfo::Mode rmode);
+  void near_jmp(intptr_t disp, RelocInfo::Mode rmode);
+
   void call(Handle<Code> target,
             RelocInfo::Mode rmode = RelocInfo::CODE_TARGET);
 
@@ -754,6 +756,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Jump near absolute indirect (r64)
   void jmp(Register adr);
   void jmp(Operand src);
+
+  // Unconditional jump relative to the current address. Low-level routine,
+  // use with caution!
+  void jmp_rel(int offset);
 
   // Conditional jumps
   void j(Condition cc,
@@ -872,6 +878,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   void andps(XMMRegister dst, XMMRegister src);
   void andps(XMMRegister dst, Operand src);
+  void andnps(XMMRegister dst, XMMRegister src);
+  void andnps(XMMRegister dst, Operand src);
   void orps(XMMRegister dst, XMMRegister src);
   void orps(XMMRegister dst, Operand src);
   void xorps(XMMRegister dst, XMMRegister src);
@@ -1067,6 +1075,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // SSE 4.1 instruction
   void insertps(XMMRegister dst, XMMRegister src, byte imm8);
+  void insertps(XMMRegister dst, Operand src, byte imm8);
   void extractps(Register dst, XMMRegister src, byte imm8);
   void pextrb(Register dst, XMMRegister src, int8_t imm8);
   void pextrb(Operand dst, XMMRegister src, int8_t imm8);
@@ -1319,6 +1328,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   AVX_SP_3(vmin, 0x5d)
   AVX_SP_3(vmax, 0x5f)
   AVX_P_3(vand, 0x54)
+  AVX_P_3(vandn, 0x55)
   AVX_P_3(vor, 0x56)
   AVX_P_3(vxor, 0x57)
   AVX_3(vcvtsd2ss, 0x5a, vsd)
@@ -1775,6 +1785,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   byte byte_at(int pos) { return buffer_start_[pos]; }
   void set_byte_at(int pos, byte value) { buffer_start_[pos] = value; }
+
+#if defined(V8_OS_WIN_X64)
+  win64_unwindinfo::BuiltinUnwindInfo GetUnwindInfo() const;
+#endif
 
  protected:
   // Call near indirect
@@ -2246,6 +2260,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   ConstPool constpool_;
 
   friend class ConstPool;
+
+#if defined(V8_OS_WIN_X64)
+  std::unique_ptr<win64_unwindinfo::XdataEncoder> xdata_encoder_;
+#endif
 };
 
 

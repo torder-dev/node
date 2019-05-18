@@ -7,7 +7,7 @@
 
 #include "include/v8.h"
 #include "src/allocation.h"
-// TODO(ishell): remove once FLAG_track_constant_fields is removed.
+// TODO(bmeurer): Remove once FLAG_modify_field_representation_inplace is gone.
 #include "src/flags.h"
 #include "src/utils.h"
 
@@ -78,11 +78,6 @@ enum PropertyLocation { kField = 0, kDescriptor = 1 };
 // Must fit in the BitField PropertyDetails::ConstnessField.
 enum class PropertyConstness { kMutable = 0, kConst = 1 };
 
-// TODO(ishell): remove once constant field tracking is done.
-const PropertyConstness kDefaultFieldConstness =
-    FLAG_track_constant_fields ? PropertyConstness::kConst
-                               : PropertyConstness::kMutable;
-
 class Representation {
  public:
   enum Kind {
@@ -114,6 +109,12 @@ class Representation {
 
   bool IsCompatibleForStore(const Representation& other) const {
     return Equals(other);
+  }
+
+  bool CanBeInPlaceChangedTo(const Representation& other) const {
+    if (IsNone()) return true;
+    if (!FLAG_modify_field_representation_inplace) return false;
+    return (IsSmi() || IsHeapObject()) && other.IsTagged();
   }
 
   bool is_more_general_than(const Representation& other) const {
@@ -402,8 +403,8 @@ inline PropertyConstness GeneralizeConstness(PropertyConstness a,
   return a == PropertyConstness::kMutable ? PropertyConstness::kMutable : b;
 }
 
-std::ostream& operator<<(std::ostream& os,
-                         const PropertyAttributes& attributes);
+V8_EXPORT_PRIVATE std::ostream& operator<<(
+    std::ostream& os, const PropertyAttributes& attributes);
 }  // namespace internal
 }  // namespace v8
 

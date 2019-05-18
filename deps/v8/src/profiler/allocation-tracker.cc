@@ -78,9 +78,8 @@ AllocationTraceTree::AllocationTraceTree()
 AllocationTraceNode* AllocationTraceTree::AddPathFromEnd(
     const Vector<unsigned>& path) {
   AllocationTraceNode* node = root();
-  for (unsigned* entry = path.start() + path.length() - 1;
-       entry != path.start() - 1;
-       --entry) {
+  for (unsigned* entry = path.begin() + path.length() - 1;
+       entry != path.begin() - 1; --entry) {
     node = node->FindOrAddChild(*entry);
   }
   return node;
@@ -137,7 +136,7 @@ void AddressToTraceMap::Clear() {
 
 
 void AddressToTraceMap::Print() {
-  PrintF("[AddressToTraceMap (%" PRIuS "): \n", ranges_.size());
+  PrintF("[AddressToTraceMap (%zu): \n", ranges_.size());
   for (RangeMap::iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
     PrintF("[%p - %p] => %u\n", reinterpret_cast<void*>(it->second.start),
            reinterpret_cast<void*>(it->first), it->second.trace_node_id);

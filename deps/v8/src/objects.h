@@ -23,6 +23,8 @@
 #include "src/flags.h"
 #include "src/message-template.h"
 #include "src/objects-definitions.h"
+#include "src/objects/object-list-macros.h"
+#include "src/objects/tagged-impl.h"
 #include "src/property-details.h"
 #include "src/utils.h"
 
@@ -99,6 +101,7 @@
 //         - ScopeInfo
 //         - ModuleInfo
 //         - ScriptContextTable
+//         - ClosureFeedbackCellArray
 //       - FixedDoubleArray
 //     - Name
 //       - String
@@ -185,16 +188,19 @@ namespace internal {
 struct InliningPosition;
 class PropertyDescriptorObject;
 
-// SKIP_WRITE_BARRIER skips the write barrier.
+// UNSAFE_SKIP_WRITE_BARRIER skips the write barrier.
+// SKIP_WRITE_BARRIER skips the write barrier and asserts that this is safe in
+// the MemoryOptimizer
 // UPDATE_WEAK_WRITE_BARRIER skips the marking part of the write barrier and
 // only performs the generational part.
 // UPDATE_WRITE_BARRIER is doing the full barrier, marking and generational.
 enum WriteBarrierMode {
   SKIP_WRITE_BARRIER,
+  UNSAFE_SKIP_WRITE_BARRIER,
   UPDATE_WEAK_WRITE_BARRIER,
+  UPDATE_EPHEMERON_KEY_WRITE_BARRIER,
   UPDATE_WRITE_BARRIER
 };
-
 
 // PropertyNormalizationMode is used to specify whether to keep
 // inobject properties when normalizing properties of a JSObject.
@@ -249,285 +255,6 @@ bool ComparisonResultToBool(Operation op, ComparisonResult result);
 
 enum class OnNonExistent { kThrowReferenceError, kReturnUndefined };
 
-class AbstractCode;
-class AccessorPair;
-class AccessCheckInfo;
-class AllocationSite;
-class ByteArray;
-class CachedTemplateObject;
-class Cell;
-class ConsString;
-class DependentCode;
-class ElementsAccessor;
-class EnumCache;
-class FixedArrayBase;
-class FixedDoubleArray;
-class FreeSpace;
-class FunctionLiteral;
-class FunctionTemplateInfo;
-class JSAsyncGeneratorObject;
-class JSGlobalProxy;
-class JSPromise;
-class JSProxy;
-class JSProxyRevocableResult;
-class KeyAccumulator;
-class LayoutDescriptor;
-class LookupIterator;
-class FieldType;
-class Module;
-class ModuleInfoEntry;
-class MutableHeapNumber;
-class ObjectHashTable;
-class ObjectTemplateInfo;
-class ObjectVisitor;
-class PreparseData;
-class PropertyArray;
-class PropertyCell;
-class PropertyDescriptor;
-class PrototypeInfo;
-class ReadOnlyRoots;
-class RegExpMatchInfo;
-class RootVisitor;
-class SafepointEntry;
-class ScriptContextTable;
-class SharedFunctionInfo;
-class StringStream;
-class Symbol;
-class FeedbackCell;
-class FeedbackMetadata;
-class FeedbackVector;
-class UncompiledData;
-class TemplateInfo;
-class TransitionArray;
-class TemplateList;
-class WasmInstanceObject;
-class WasmMemoryObject;
-template <typename T>
-class ZoneForwardList;
-
-#ifdef OBJECT_PRINT
-#define DECL_PRINTER(Name) void Name##Print(std::ostream& os);  // NOLINT
-#else
-#define DECL_PRINTER(Name)
-#endif
-
-#define OBJECT_TYPE_LIST(V) \
-  V(Smi)                    \
-  V(LayoutDescriptor)       \
-  V(HeapObject)             \
-  V(Primitive)              \
-  V(Number)                 \
-  V(Numeric)
-
-#define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V) \
-  V(AbstractCode)                              \
-  V(AccessCheckNeeded)                         \
-  V(AllocationSite)                            \
-  V(ArrayList)                                 \
-  V(BigInt)                                    \
-  V(BigIntWrapper)                             \
-  V(ObjectBoilerplateDescription)              \
-  V(Boolean)                                   \
-  V(BooleanWrapper)                            \
-  V(BreakPoint)                                \
-  V(BreakPointInfo)                            \
-  V(ByteArray)                                 \
-  V(BytecodeArray)                             \
-  V(CachedTemplateObject)                      \
-  V(CallHandlerInfo)                           \
-  V(Callable)                                  \
-  V(Cell)                                      \
-  V(ClassBoilerplate)                          \
-  V(Code)                                      \
-  V(CodeDataContainer)                         \
-  V(CompilationCacheTable)                     \
-  V(ConsString)                                \
-  V(Constructor)                               \
-  V(Context)                                   \
-  V(CoverageInfo)                              \
-  V(DataHandler)                               \
-  V(DeoptimizationData)                        \
-  V(DependentCode)                             \
-  V(DescriptorArray)                           \
-  V(EmbedderDataArray)                         \
-  V(EphemeronHashTable)                        \
-  V(EnumCache)                                 \
-  V(ExternalOneByteString)                     \
-  V(ExternalString)                            \
-  V(ExternalTwoByteString)                     \
-  V(FeedbackCell)                              \
-  V(FeedbackMetadata)                          \
-  V(FeedbackVector)                            \
-  V(Filler)                                    \
-  V(FixedArray)                                \
-  V(FixedArrayBase)                            \
-  V(FixedArrayExact)                           \
-  V(FixedBigInt64Array)                        \
-  V(FixedBigUint64Array)                       \
-  V(FixedDoubleArray)                          \
-  V(FixedFloat32Array)                         \
-  V(FixedFloat64Array)                         \
-  V(FixedInt16Array)                           \
-  V(FixedInt32Array)                           \
-  V(FixedInt8Array)                            \
-  V(FixedTypedArrayBase)                       \
-  V(FixedUint16Array)                          \
-  V(FixedUint32Array)                          \
-  V(FixedUint8Array)                           \
-  V(FixedUint8ClampedArray)                    \
-  V(Foreign)                                   \
-  V(FrameArray)                                \
-  V(FreeSpace)                                 \
-  V(Function)                                  \
-  V(GlobalDictionary)                          \
-  V(HandlerTable)                              \
-  V(HeapNumber)                                \
-  V(InternalizedString)                        \
-  V(JSArgumentsObject)                         \
-  V(JSArgumentsObjectWithLength)               \
-  V(JSArray)                                   \
-  V(JSArrayBuffer)                             \
-  V(JSArrayBufferView)                         \
-  V(JSArrayIterator)                           \
-  V(JSAsyncFromSyncIterator)                   \
-  V(JSAsyncFunctionObject)                     \
-  V(JSAsyncGeneratorObject)                    \
-  V(JSBoundFunction)                           \
-  V(JSCollection)                              \
-  V(JSContextExtensionObject)                  \
-  V(JSDataView)                                \
-  V(JSDate)                                    \
-  V(JSError)                                   \
-  V(JSFunction)                                \
-  V(JSGeneratorObject)                         \
-  V(JSGlobalObject)                            \
-  V(JSGlobalProxy)                             \
-  V(JSMap)                                     \
-  V(JSMapIterator)                             \
-  V(JSMessageObject)                           \
-  V(JSModuleNamespace)                         \
-  V(JSObject)                                  \
-  V(JSPromise)                                 \
-  V(JSProxy)                                   \
-  V(JSReceiver)                                \
-  V(JSRegExp)                                  \
-  V(JSRegExpResult)                            \
-  V(JSRegExpStringIterator)                    \
-  V(JSSet)                                     \
-  V(JSSetIterator)                             \
-  V(JSSloppyArgumentsObject)                   \
-  V(JSStringIterator)                          \
-  V(JSTypedArray)                              \
-  V(JSValue)                                   \
-  V(JSWeakRef)                                 \
-  V(JSWeakCollection)                          \
-  V(JSFinalizationGroup)                       \
-  V(JSFinalizationGroupCleanupIterator)        \
-  V(JSWeakMap)                                 \
-  V(JSWeakSet)                                 \
-  V(LoadHandler)                               \
-  V(Map)                                       \
-  V(MapCache)                                  \
-  V(Microtask)                                 \
-  V(ModuleInfo)                                \
-  V(MutableHeapNumber)                         \
-  V(Name)                                      \
-  V(NameDictionary)                            \
-  V(NativeContext)                             \
-  V(NormalizedMapCache)                        \
-  V(NumberDictionary)                          \
-  V(NumberWrapper)                             \
-  V(ObjectHashSet)                             \
-  V(ObjectHashTable)                           \
-  V(Oddball)                                   \
-  V(OrderedHashMap)                            \
-  V(OrderedHashSet)                            \
-  V(OrderedNameDictionary)                     \
-  V(PreparseData)                              \
-  V(PromiseReactionJobTask)                    \
-  V(PropertyArray)                             \
-  V(PropertyCell)                              \
-  V(PropertyDescriptorObject)                  \
-  V(RegExpMatchInfo)                           \
-  V(ScopeInfo)                                 \
-  V(ScriptContextTable)                        \
-  V(ScriptWrapper)                             \
-  V(SeqOneByteString)                          \
-  V(SeqString)                                 \
-  V(SeqTwoByteString)                          \
-  V(SharedFunctionInfo)                        \
-  V(SimpleNumberDictionary)                    \
-  V(SlicedString)                              \
-  V(SloppyArgumentsElements)                   \
-  V(SmallOrderedHashMap)                       \
-  V(SmallOrderedHashSet)                       \
-  V(SmallOrderedNameDictionary)                \
-  V(SourcePositionTableWithFrameCache)         \
-  V(StoreHandler)                              \
-  V(String)                                    \
-  V(StringSet)                                 \
-  V(StringTable)                               \
-  V(StringWrapper)                             \
-  V(Struct)                                    \
-  V(Symbol)                                    \
-  V(SymbolWrapper)                             \
-  V(TemplateInfo)                              \
-  V(TemplateList)                              \
-  V(TemplateObjectDescription)                 \
-  V(ThinString)                                \
-  V(TransitionArray)                           \
-  V(UncompiledData)                            \
-  V(UncompiledDataWithPreparseData)            \
-  V(UncompiledDataWithoutPreparseData)         \
-  V(Undetectable)                              \
-  V(UniqueName)                                \
-  V(WasmExceptionObject)                       \
-  V(WasmGlobalObject)                          \
-  V(WasmInstanceObject)                        \
-  V(WasmMemoryObject)                          \
-  V(WasmModuleObject)                          \
-  V(WasmTableObject)                           \
-  V(WeakFixedArray)                            \
-  V(WeakArrayList)                             \
-  V(WeakCell)
-
-#ifdef V8_INTL_SUPPORT
-#define HEAP_OBJECT_ORDINARY_TYPE_LIST(V) \
-  HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)  \
-  V(JSV8BreakIterator)                    \
-  V(JSCollator)                           \
-  V(JSDateTimeFormat)                     \
-  V(JSListFormat)                         \
-  V(JSLocale)                             \
-  V(JSNumberFormat)                       \
-  V(JSPluralRules)                        \
-  V(JSRelativeTimeFormat)                 \
-  V(JSSegmentIterator)                    \
-  V(JSSegmenter)
-#else
-#define HEAP_OBJECT_ORDINARY_TYPE_LIST(V) HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)
-#endif  // V8_INTL_SUPPORT
-
-#define HEAP_OBJECT_TEMPLATE_TYPE_LIST(V) \
-  V(Dictionary)                           \
-  V(HashTable)
-
-#define HEAP_OBJECT_TYPE_LIST(V)    \
-  HEAP_OBJECT_ORDINARY_TYPE_LIST(V) \
-  HEAP_OBJECT_TEMPLATE_TYPE_LIST(V)
-
-#define ODDBALL_LIST(V)                 \
-  V(Undefined, undefined_value)         \
-  V(Null, null_value)                   \
-  V(TheHole, the_hole_value)            \
-  V(Exception, exception)               \
-  V(Uninitialized, uninitialized_value) \
-  V(True, true_value)                   \
-  V(False, false_value)                 \
-  V(ArgumentsMarker, arguments_marker)  \
-  V(OptimizedOut, optimized_out)        \
-  V(StaleRegister, stale_register)
-
 // The element types selection for CreateListFromArrayLike.
 enum class ElementTypes { kAll, kStringAndSymbol };
 
@@ -541,28 +268,14 @@ ShouldThrow GetShouldThrow(Isolate* isolate, Maybe<ShouldThrow> should_throw);
 // There must only be a single data member in Object: the Address ptr,
 // containing the tagged heap pointer that this Object instance refers to.
 // For a design overview, see https://goo.gl/Ph4CGz.
-class Object {
+class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
  public:
-  constexpr Object() : ptr_(kNullAddress) {}
-  explicit constexpr Object(Address ptr) : ptr_(ptr) {}
-
-  // Make clang on Linux catch what MSVC complains about on Windows:
-  operator bool() const = delete;
-
-  bool operator==(const Object that) const { return this->ptr() == that.ptr(); }
-  bool operator!=(const Object that) const { return this->ptr() != that.ptr(); }
-  // Usage in std::set requires operator<.
-  bool operator<(const Object that) const { return this->ptr() < that.ptr(); }
-
-  // Returns the tagged "(heap) object pointer" representation of this object.
-  constexpr Address ptr() const { return ptr_; }
+  constexpr Object() : TaggedImpl(kNullAddress) {}
+  explicit constexpr Object(Address ptr) : TaggedImpl(ptr) {}
 
   // These operator->() overloads are required for handlified code.
   Object* operator->() { return this; }
   const Object* operator->() const { return this; }
-
-  // Type testing.
-  bool IsObject() const { return true; }
 
 #define IS_TYPE_FUNCTION_DECL(Type) V8_INLINE bool Is##Type() const;
   OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
@@ -582,33 +295,10 @@ class Object {
   V8_INLINE bool IsNullOrUndefined(ReadOnlyRoots roots) const;
   V8_INLINE bool IsNullOrUndefined() const;
 
+  V8_INLINE bool IsZero() const;
+  V8_INLINE bool IsNoSharedNameSentinel() const;
+
   enum class Conversion { kToNumber, kToNumeric };
-
-#define RETURN_FAILURE(isolate, should_throw, call) \
-  do {                                              \
-    if ((should_throw) == kDontThrow) {             \
-      return Just(false);                           \
-    } else {                                        \
-      isolate->Throw(*isolate->factory()->call);    \
-      return Nothing<bool>();                       \
-    }                                               \
-  } while (false)
-
-#define MAYBE_RETURN(call, value)         \
-  do {                                    \
-    if ((call).IsNothing()) return value; \
-  } while (false)
-
-#define MAYBE_RETURN_NULL(call) MAYBE_RETURN(call, MaybeHandle<Object>())
-
-#define MAYBE_ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, dst, call) \
-  do {                                                               \
-    Isolate* __isolate__ = (isolate);                                \
-    if (!(call).To(&dst)) {                                          \
-      DCHECK(__isolate__->has_pending_exception());                  \
-      return ReadOnlyRoots(__isolate__).exception();                 \
-    }                                                                \
-  } while (false)
 
 #define DECL_STRUCT_PREDICATE(NAME, Name, name) V8_INLINE bool Is##Name() const;
   STRUCT_LIST(DECL_STRUCT_PREDICATE)
@@ -639,8 +329,8 @@ class Object {
   Handle<FieldType> OptimalType(Isolate* isolate,
                                 Representation representation);
 
-  static Handle<Object> NewStorageFor(Isolate* isolate, Handle<Object> object,
-                                      Representation representation);
+  V8_EXPORT_PRIVATE static Handle<Object> NewStorageFor(
+      Isolate* isolate, Handle<Object> object, Representation representation);
 
   static Handle<Object> WrapForRead(Isolate* isolate, Handle<Object> object,
                                     Representation representation);
@@ -650,20 +340,19 @@ class Object {
   inline bool HasValidElements();
 
   // ECMA-262 9.2.
-  bool BooleanValue(Isolate* isolate);
+  V8_EXPORT_PRIVATE bool BooleanValue(Isolate* isolate);
   Object ToBoolean(Isolate* isolate);
 
   // ES6 section 7.2.11 Abstract Relational Comparison
-  V8_WARN_UNUSED_RESULT static Maybe<ComparisonResult> Compare(
-      Isolate* isolate, Handle<Object> x, Handle<Object> y);
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<ComparisonResult>
+  Compare(Isolate* isolate, Handle<Object> x, Handle<Object> y);
 
   // ES6 section 7.2.12 Abstract Equality Comparison
-  V8_WARN_UNUSED_RESULT static Maybe<bool> Equals(Isolate* isolate,
-                                                  Handle<Object> x,
-                                                  Handle<Object> y);
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<bool> Equals(
+      Isolate* isolate, Handle<Object> x, Handle<Object> y);
 
   // ES6 section 7.2.13 Strict Equality Comparison
-  bool StrictEquals(Object that);
+  V8_EXPORT_PRIVATE bool StrictEquals(Object that);
 
   // ES6 section 7.1.13 ToObject
   // Convert to a JSObject if needed.
@@ -714,8 +403,8 @@ class Object {
   V8_WARN_UNUSED_RESULT static inline MaybeHandle<String> ToString(
       Isolate* isolate, Handle<Object> input);
 
-  static Handle<String> NoSideEffectsToString(Isolate* isolate,
-                                              Handle<Object> input);
+  V8_EXPORT_PRIVATE static Handle<String> NoSideEffectsToString(
+      Isolate* isolate, Handle<Object> input);
 
   // ES6 section 7.1.14 ToPropertyKey
   V8_WARN_UNUSED_RESULT static inline MaybeHandle<Object> ToPropertyKey(
@@ -780,13 +469,14 @@ class Object {
   // In some cases, an exception is thrown regardless of the ShouldThrow
   // argument.  These cases are either in accordance with the spec or not
   // covered by it (eg., concerning API callbacks).
-  V8_WARN_UNUSED_RESULT static Maybe<bool> SetProperty(
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<bool> SetProperty(
       LookupIterator* it, Handle<Object> value, StoreOrigin store_origin,
       Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> SetProperty(
-      Isolate* isolate, Handle<Object> object, Handle<Name> name,
-      Handle<Object> value, StoreOrigin store_origin = StoreOrigin::kMaybeKeyed,
-      Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
+  SetProperty(Isolate* isolate, Handle<Object> object, Handle<Name> name,
+              Handle<Object> value,
+              StoreOrigin store_origin = StoreOrigin::kMaybeKeyed,
+              Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
   V8_WARN_UNUSED_RESULT static inline MaybeHandle<Object> SetPropertyOrElement(
       Isolate* isolate, Handle<Object> object, Handle<Name> name,
       Handle<Object> value,
@@ -847,12 +537,16 @@ class Object {
   // Returns the permanent hash code associated with this object depending on
   // the actual object type. May create and store a hash code if needed and none
   // exists.
-  Smi GetOrCreateHash(Isolate* isolate);
+  V8_EXPORT_PRIVATE Smi GetOrCreateHash(Isolate* isolate);
 
   // Checks whether this object has the same value as the given one.  This
   // function is implemented according to ES5, section 9.12 and can be used
   // to implement the Object.is function.
   V8_EXPORT_PRIVATE bool SameValue(Object other);
+
+  // A part of SameValue which handles Number vs. Number case.
+  // Treats NaN == NaN and +0 != -0.
+  inline static bool SameNumberValue(double number1, double number2);
 
   // Checks whether this object has the same value as the given one.
   // +0 and -0 are treated equal. Everything else is the same as SameValue.
@@ -883,35 +577,7 @@ class Object {
   // and length.
   bool IterationHasObservableEffects();
 
-  //
-  // The following GetHeapObjectXX methods mimic corresponding functionality
-  // in MaybeObject. Having them here allows us to unify code that processes
-  // ObjectSlots and MaybeObjectSlots.
-  //
-
-  // If this Object is a strong pointer to a HeapObject, returns true and
-  // sets *result. Otherwise returns false.
-  inline bool GetHeapObjectIfStrong(HeapObject* result) const;
-
-  // If this Object is a strong pointer to a HeapObject (weak pointers are not
-  // expected), returns true and sets *result. Otherwise returns false.
-  inline bool GetHeapObject(HeapObject* result) const;
-
-  // DCHECKs that this Object is a strong pointer to a HeapObject and returns
-  // the HeapObject.
-  inline HeapObject GetHeapObject() const;
-
-  // Always returns false because Object is not expected to be a weak pointer
-  // to a HeapObject.
-  inline bool GetHeapObjectIfWeak(HeapObject* result) const {
-    DCHECK(!HasWeakHeapObjectTag(ptr()));
-    return false;
-  }
-  // Always returns false because Object is not expected to be a weak pointer
-  // to a HeapObject.
-  inline bool IsCleared() const { return false; }
-
-  DECL_VERIFIER(Object)
+  EXPORT_DECL_VERIFIER(Object)
 
 #ifdef VERIFY_HEAP
   // Verify a pointer is a valid object pointer.
@@ -921,12 +587,12 @@ class Object {
   inline void VerifyApiCallResultType();
 
   // Prints this object without details.
-  void ShortPrint(FILE* out = stdout) const;
+  V8_EXPORT_PRIVATE void ShortPrint(FILE* out = stdout) const;
 
   // Prints this object without details to a message accumulator.
-  void ShortPrint(StringStream* accumulator) const;
+  V8_EXPORT_PRIVATE void ShortPrint(StringStream* accumulator) const;
 
-  void ShortPrint(std::ostream& os) const;  // NOLINT
+  V8_EXPORT_PRIVATE void ShortPrint(std::ostream& os) const;  // NOLINT
 
   inline static Object cast(Object object) { return object; }
   inline static Object unchecked_cast(Object object) { return object; }
@@ -936,10 +602,10 @@ class Object {
 
 #ifdef OBJECT_PRINT
   // For our gdb macros, we should perhaps change these in the future.
-  void Print() const;
+  V8_EXPORT_PRIVATE void Print() const;
 
   // Prints this object with details.
-  void Print(std::ostream& os) const;  // NOLINT
+  V8_EXPORT_PRIVATE void Print(std::ostream& os) const;  // NOLINT
 #else
   void Print() const { ShortPrint(); }
   void Print(std::ostream& os) const { ShortPrint(os); }  // NOLINT
@@ -987,8 +653,8 @@ class Object {
       Isolate* isolate, Handle<Object> input);
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ConvertToPropertyKey(
       Isolate* isolate, Handle<Object> value);
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ConvertToString(
-      Isolate* isolate, Handle<Object> input);
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<String>
+  ConvertToString(Isolate* isolate, Handle<Object> input);
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ConvertToNumberOrNumeric(
       Isolate* isolate, Handle<Object> input, Conversion mode);
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ConvertToInteger(
@@ -1001,22 +667,13 @@ class Object {
       Isolate* isolate, Handle<Object> input);
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ConvertToIndex(
       Isolate* isolate, Handle<Object> input, MessageTemplate error_index);
-
-  Address ptr_;
 };
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, const Object& obj);
 
-// In objects.h to be usable without objects-inl.h inclusion.
-bool Object::IsSmi() const { return HAS_SMI_TAG(ptr()); }
-bool Object::IsHeapObject() const {
-  DCHECK_EQ(!IsSmi(), Internals::HasHeapObjectTag(ptr()));
-  return !IsSmi();
-}
-
 struct Brief {
-  V8_EXPORT_PRIVATE explicit Brief(const Object v);
-  explicit Brief(const MaybeObject v);
+  template <typename TObject>
+  explicit Brief(TObject v) : value{v.ptr()} {}
   // {value} is a tagged heap object reference (weak or strong), equivalent to
   // a MaybeObject's payload. It has a plain Address type to keep #includes
   // lightweight.
@@ -1028,7 +685,7 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, const Brief& v);
 // Objects should never have the weak tag; this variant is for overzealous
 // checking.
 V8_INLINE static bool HasWeakHeapObjectTag(const Object value) {
-  return ((value->ptr() & kHeapObjectTagMask) == kWeakHeapObjectTag);
+  return HAS_WEAK_HEAP_OBJECT_TAG(value.ptr());
 }
 
 // Heap objects typically have a map pointer in their first word.  However,

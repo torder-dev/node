@@ -9,11 +9,11 @@
 #include <cmath>
 #include <memory>
 
-#include "src/api-inl.h"
-#include "src/api-natives.h"
+#include "src/api/api-inl.h"
+#include "src/api/api-natives.h"
 #include "src/arguments-inl.h"
 #include "src/counters.h"
-#include "src/date.h"
+#include "src/date/date.h"
 #include "src/global-handles.h"
 #include "src/heap/factory.h"
 #include "src/isolate-inl.h"

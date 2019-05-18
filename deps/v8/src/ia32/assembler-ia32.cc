@@ -50,10 +50,10 @@
 #include "src/assembler-inl.h"
 #include "src/base/bits.h"
 #include "src/base/cpu.h"
-#include "src/conversions-inl.h"
 #include "src/deoptimizer.h"
 #include "src/disassembler.h"
 #include "src/macro-assembler.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/string-constants.h"
 #include "src/v8.h"
 
@@ -63,14 +63,14 @@ namespace internal {
 Immediate Immediate::EmbeddedNumber(double value) {
   int32_t smi;
   if (DoubleToSmiInteger(value, &smi)) return Immediate(Smi::FromInt(smi));
-  Immediate result(0, RelocInfo::EMBEDDED_OBJECT);
+  Immediate result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.is_heap_object_request_ = true;
   result.value_.heap_object_request = HeapObjectRequest(value);
   return result;
 }
 
 Immediate Immediate::EmbeddedStringConstant(const StringConstantBase* str) {
-  Immediate result(0, RelocInfo::EMBEDDED_OBJECT);
+  Immediate result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.is_heap_object_request_ = true;
   result.value_.heap_object_request = HeapObjectRequest(str);
   return result;
@@ -286,8 +286,8 @@ void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
     Handle<HeapObject> object;
     switch (request.kind()) {
       case HeapObjectRequest::kHeapNumber:
-        object =
-            isolate->factory()->NewHeapNumber(request.heap_number(), TENURED);
+        object = isolate->factory()->NewHeapNumber(request.heap_number(),
+                                                   AllocationType::kOld);
         break;
       case HeapObjectRequest::kStringConstant: {
         const StringConstantBase* str = request.string();
@@ -1683,7 +1683,7 @@ void Assembler::jmp(Address entry, RelocInfo::Mode rmode) {
   EnsureSpace ensure_space(this);
   DCHECK(!RelocInfo::IsCodeTarget(rmode));
   EMIT(0xE9);
-  if (RelocInfo::IsRuntimeEntry(rmode)) {
+  if (RelocInfo::IsRuntimeEntry(rmode) || RelocInfo::IsWasmCall(rmode)) {
     emit(entry, rmode);
   } else {
     emit(entry - (reinterpret_cast<Address>(pc_) + sizeof(int32_t)), rmode);
@@ -2280,6 +2280,13 @@ void Assembler::andps(XMMRegister dst, Operand src) {
   emit_sse_operand(dst, src);
 }
 
+void Assembler::andnps(XMMRegister dst, Operand src) {
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x55);
+  emit_sse_operand(dst, src);
+}
+
 void Assembler::orps(XMMRegister dst, Operand src) {
   EnsureSpace ensure_space(this);
   EMIT(0x0F);
@@ -2468,18 +2475,10 @@ void Assembler::cmpltsd(XMMRegister dst, XMMRegister src) {
   EMIT(1);  // LT == 1
 }
 
-
-void Assembler::movaps(XMMRegister dst, XMMRegister src) {
+void Assembler::movaps(XMMRegister dst, Operand src) {
   EnsureSpace ensure_space(this);
   EMIT(0x0F);
   EMIT(0x28);
-  emit_sse_operand(dst, src);
-}
-
-void Assembler::movups(XMMRegister dst, XMMRegister src) {
-  EnsureSpace ensure_space(this);
-  EMIT(0x0F);
-  EMIT(0x10);
   emit_sse_operand(dst, src);
 }
 
@@ -3270,7 +3269,7 @@ void Assembler::emit_operand(int code, Operand adr) {
   DCHECK(!options().isolate_independent_code ||
          adr.rmode_ != RelocInfo::CODE_TARGET);
   DCHECK(!options().isolate_independent_code ||
-         adr.rmode_ != RelocInfo::EMBEDDED_OBJECT);
+         adr.rmode_ != RelocInfo::FULL_EMBEDDED_OBJECT);
   DCHECK(!options().isolate_independent_code ||
          adr.rmode_ != RelocInfo::EXTERNAL_REFERENCE);
 

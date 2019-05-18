@@ -29,7 +29,7 @@
 
 #include "src/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/debug/liveedit.h"
 #include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
@@ -46,8 +46,8 @@ void CompareStringsOneWay(const char* s1, const char* s2,
   changes->clear();
   LiveEdit::CompareStrings(isolate, i_s1, i_s2, changes);
 
-  int len1 = StrLength(s1);
-  int len2 = StrLength(s2);
+  int len1 = static_cast<int>(strlen(s1));
+  int len2 = static_cast<int>(strlen(s2));
 
   int pos1 = 0;
   int pos2 = 0;
@@ -353,6 +353,7 @@ TEST(LiveEditPatchFunctions) {
   i::FLAG_allow_natives_syntax = true;
   PatchFunctions(context,
                  "function foo(a, b) { return a + b; }; "
+                 "%PrepareFunctionForOptimization(foo);"
                  "%OptimizeFunctionOnNextCall(foo); foo(1,2);",
                  "function foo(a, b) { return a * b; };");
   CHECK_EQ(CompileRunChecked(env->GetIsolate(), "foo(5,7)")

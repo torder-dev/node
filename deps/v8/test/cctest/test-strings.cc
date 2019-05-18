@@ -34,7 +34,7 @@
 
 #include "src/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"
@@ -830,7 +830,6 @@ static void InitializeGenerationData(
       break;
     default:
       UNREACHABLE();
-      break;
   }
   // Must remove the influence of the above decision.
   test_case /= kBalances;
@@ -854,7 +853,6 @@ static void InitializeGenerationData(
       break;
     default:
       UNREACHABLE();
-      break;
   }
   // Must remove the influence of the above decision.
   test_case /= kTreeLengths;
@@ -916,10 +914,10 @@ TEST(Utf8Conversion) {
   const char* one_byte_string = "abcdef12345";
   int len = v8::String::NewFromUtf8(CcTest::isolate(), one_byte_string,
                                     v8::NewStringType::kNormal,
-                                    StrLength(one_byte_string))
+                                    static_cast<int>(strlen(one_byte_string)))
                 .ToLocalChecked()
                 ->Utf8Length(CcTest::isolate());
-  CHECK_EQ(StrLength(one_byte_string), len);
+  CHECK_EQ(strlen(one_byte_string), len);
   // A mixed one-byte and two-byte string
   // U+02E4 -> CB A4
   // U+0064 -> 64
@@ -1228,7 +1226,6 @@ TEST(JSONStringifySliceMadeExternal) {
 }
 
 TEST(JSONStringifyWellFormed) {
-  FLAG_harmony_json_stringify = true;
   CcTest::InitializeVM();
   v8::HandleScope handle_scope(CcTest::isolate());
   v8::Local<v8::Context> context = CcTest::isolate()->GetCurrentContext();
@@ -1399,7 +1396,8 @@ class OneByteVectorResource : public v8::String::ExternalOneByteStringResource {
       : data_(vector) {}
   ~OneByteVectorResource() override = default;
   size_t length() const override { return data_.length(); }
-  const char* data() const override { return data_.start(); }
+  const char* data() const override { return data_.begin(); }
+
  private:
   i::Vector<const char> data_;
 };
@@ -1706,7 +1704,6 @@ TEST(InvalidExternalString) {
   }
 }
 
-
 #define INVALID_STRING_TEST(FUN, TYPE)                                         \
   TEST(StringOOM##FUN) {                                                       \
     CcTest::InitializeVM();                                                    \
@@ -1716,9 +1713,9 @@ TEST(InvalidExternalString) {
     static const int invalid = String::kMaxLength + 1;                         \
     HandleScope scope(isolate);                                                \
     Vector<TYPE> dummy = Vector<TYPE>::New(invalid);                           \
-    memset(dummy.start(), 0x0, dummy.length() * sizeof(TYPE));                 \
+    memset(dummy.begin(), 0x0, dummy.length() * sizeof(TYPE));                 \
     CHECK(isolate->factory()->FUN(Vector<const TYPE>::cast(dummy)).is_null()); \
-    memset(dummy.start(), 0x20, dummy.length() * sizeof(TYPE));                \
+    memset(dummy.begin(), 0x20, dummy.length() * sizeof(TYPE));                \
     CHECK(isolate->has_pending_exception());                                   \
     isolate->clear_pending_exception();                                        \
     dummy.Dispose();                                                           \
@@ -1739,8 +1736,8 @@ TEST(FormatMessage) {
   Handle<String> arg1 = isolate->factory()->NewStringFromAsciiChecked("arg1");
   Handle<String> arg2 = isolate->factory()->NewStringFromAsciiChecked("arg2");
   Handle<String> result =
-      MessageFormatter::FormatMessage(
-          isolate, MessageTemplate::kPropertyNotFunction, arg0, arg1, arg2)
+      MessageFormatter::Format(isolate, MessageTemplate::kPropertyNotFunction,
+                               arg0, arg1, arg2)
           .ToHandleChecked();
   Handle<String> expected = isolate->factory()->NewStringFromAsciiChecked(
       "'arg0' returned for property 'arg1' of object 'arg2' is not a function");

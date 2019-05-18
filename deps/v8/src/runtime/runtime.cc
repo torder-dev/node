@@ -106,6 +106,7 @@ bool Runtime::NeedsExactContext(FunctionId id) {
       // try-catch in async function.
       return false;
     case Runtime::kAddPrivateField:
+    case Runtime::kAddPrivateBrand:
     case Runtime::kCopyDataProperties:
     case Runtime::kCreateDataProperty:
     case Runtime::kCreatePrivateNameSymbol:
@@ -174,6 +175,16 @@ bool Runtime::IsNonReturning(FunctionId id) {
       return true;
     default:
       return false;
+  }
+}
+
+bool Runtime::MayAllocate(FunctionId id) {
+  switch (id) {
+    case Runtime::kCompleteInobjectSlackTracking:
+    case Runtime::kCompleteInobjectSlackTrackingForMap:
+      return false;
+    default:
+      return true;
   }
 }
 

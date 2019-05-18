@@ -4,7 +4,7 @@
 
 #if V8_TARGET_ARCH_X64
 
-#include "src/api-arguments.h"
+#include "src/api/api-arguments.h"
 #include "src/base/adapters.h"
 #include "src/code-factory.h"
 #include "src/counters.h"
@@ -47,15 +47,11 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm, Address address,
 static void GenerateTailCallToReturnedCode(MacroAssembler* masm,
                                            Runtime::FunctionId function_id) {
   // ----------- S t a t e -------------
-  //  -- rax : argument count (preserved for callee)
   //  -- rdx : new target (preserved for callee)
   //  -- rdi : target function (preserved for callee)
   // -----------------------------------
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
-    // Push the number of arguments to the callee.
-    __ SmiTag(rax, rax);
-    __ Push(rax);
     // Push a copy of the target function and the new target.
     __ Push(rdi);
     __ Push(rdx);
@@ -68,14 +64,31 @@ static void GenerateTailCallToReturnedCode(MacroAssembler* masm,
     // Restore target function and new target.
     __ Pop(rdx);
     __ Pop(rdi);
-    __ Pop(rax);
-    __ SmiUntag(rax, rax);
   }
   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
   __ JumpCodeObject(rcx);
 }
 
 namespace {
+
+void Generate_StackOverflowCheck(
+    MacroAssembler* masm, Register num_args, Register scratch,
+    Label* stack_overflow,
+    Label::Distance stack_overflow_distance = Label::kFar) {
+  // Check the stack for overflow. We are not trying to catch
+  // interruptions (e.g. debug break and preemption) here, so the "real stack
+  // limit" is checked.
+  __ LoadRoot(kScratchRegister, RootIndex::kRealStackLimit);
+  __ movq(scratch, rsp);
+  // Make scratch the space we have left. The stack might already be overflowed
+  // here which will cause scratch to become negative.
+  __ subq(scratch, kScratchRegister);
+  __ sarq(scratch, Immediate(kSystemPointerSizeLog2));
+  // Check if the arguments will overflow the stack.
+  __ cmpq(scratch, num_args);
+  // Signed comparison.
+  __ j(less_equal, stack_overflow, stack_overflow_distance);
+}
 
 void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
   // ----------- S t a t e -------------
@@ -84,6 +97,9 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
   //  -- rdx: new target
   //  -- rsi: context
   // -----------------------------------
+
+  Label stack_overflow;
+  Generate_StackOverflowCheck(masm, rax, rcx, &stack_overflow, Label::kFar);
 
   // Enter a construct frame.
   {
@@ -142,25 +158,13 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
   __ PushReturnAddressFrom(rcx);
 
   __ ret(0);
-}
 
-void Generate_StackOverflowCheck(
-    MacroAssembler* masm, Register num_args, Register scratch,
-    Label* stack_overflow,
-    Label::Distance stack_overflow_distance = Label::kFar) {
-  // Check the stack for overflow. We are not trying to catch
-  // interruptions (e.g. debug break and preemption) here, so the "real stack
-  // limit" is checked.
-  __ LoadRoot(kScratchRegister, RootIndex::kRealStackLimit);
-  __ movq(scratch, rsp);
-  // Make scratch the space we have left. The stack might already be overflowed
-  // here which will cause scratch to become negative.
-  __ subq(scratch, kScratchRegister);
-  __ sarq(scratch, Immediate(kSystemPointerSizeLog2));
-  // Check if the arguments will overflow the stack.
-  __ cmpq(scratch, num_args);
-  // Signed comparison.
-  __ j(less_equal, stack_overflow, stack_overflow_distance);
+  __ bind(&stack_overflow);
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+    __ CallRuntime(Runtime::kThrowStackOverflow);
+    __ int3();  // This should be unreachable.
+  }
 }
 
 }  // namespace
@@ -386,7 +390,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
     __ Push(Immediate(StackFrame::TypeToMarker(type)));
     // Reserve a slot for the context. It is filled after the root register has
     // been set up.
-    __ subq(rsp, Immediate(kSystemPointerSize));
+    __ AllocateStackSpace(kSystemPointerSize);
     // Save callee-saved registers (X64/X32/Win64 calling conventions).
     __ pushq(r12);
     __ pushq(r13);
@@ -400,7 +404,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
 #ifdef _WIN64
     // On Win64 XMM6-XMM15 are callee-save.
-    __ subq(rsp, Immediate(EntryFrameConstants::kXMMRegistersBlockSize));
+    __ AllocateStackSpace(EntryFrameConstants::kXMMRegistersBlockSize);
     __ movdqu(Operand(rsp, EntryFrameConstants::kXMMRegisterSize * 0), xmm6);
     __ movdqu(Operand(rsp, EntryFrameConstants::kXMMRegisterSize * 1), xmm7);
     __ movdqu(Operand(rsp, EntryFrameConstants::kXMMRegisterSize * 2), xmm8);
@@ -891,13 +895,11 @@ static void MaybeTailCallOptimizedCodeSlot(MacroAssembler* masm,
                                            Register scratch1, Register scratch2,
                                            Register scratch3) {
   // ----------- S t a t e -------------
-  //  -- rax : argument count (preserved for callee if needed, and caller)
   //  -- rdx : new target (preserved for callee if needed, and caller)
   //  -- rdi : target function (preserved for callee if needed, and caller)
   //  -- feedback vector (preserved for caller if needed)
   // -----------------------------------
-  DCHECK(!AreAliased(feedback_vector, rax, rdx, rdi, scratch1, scratch2,
-                     scratch3));
+  DCHECK(!AreAliased(feedback_vector, rdx, rdi, scratch1, scratch2, scratch3));
 
   Label optimized_code_slot_is_weak_ref, fallthrough;
 
@@ -907,7 +909,8 @@ static void MaybeTailCallOptimizedCodeSlot(MacroAssembler* masm,
 
   __ LoadAnyTaggedField(
       optimized_code_entry,
-      FieldOperand(feedback_vector, FeedbackVector::kOptimizedCodeOffset),
+      FieldOperand(feedback_vector,
+                   FeedbackVector::kOptimizedCodeWeakOrSmiOffset),
       decompr_scratch);
 
   // Check if the code entry is a Smi. If yes, we interpret it as an
@@ -1086,7 +1089,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   Label push_stack_frame;
   // Check if feedback vector is valid. If valid, check for optimized code
   // and update invocation count. Otherwise, setup the stack frame.
-  __ JumpIfRoot(feedback_vector, RootIndex::kUndefinedValue, &push_stack_frame);
+  __ LoadTaggedPointerField(
+      rcx, FieldOperand(feedback_vector, HeapObject::kMapOffset));
+  __ CmpInstanceType(rcx, FEEDBACK_VECTOR_TYPE);
+  __ j(not_equal, &push_stack_frame);
 
   // Read off the optimized code slot in the feedback vector, and if there
   // is optimized code or an optimization marker, call that instead.
@@ -1106,10 +1112,15 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
   __ Push(rsi);  // Callee's context.
   __ Push(rdi);  // Callee's JS function.
 
-  // Reset code age.
-  __ movb(FieldOperand(kInterpreterBytecodeArrayRegister,
-                       BytecodeArray::kBytecodeAgeOffset),
-          Immediate(BytecodeArray::kNoAgeBytecodeAge));
+  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
+  // 8-bit fields next to each other, so we could just optimize by writing a
+  // 16-bit. These static asserts guard our assumption is valid.
+  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+                BytecodeArray::kOSRNestingLevelOffset + kCharSize);
+  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+  __ movw(FieldOperand(kInterpreterBytecodeArrayRegister,
+                       BytecodeArray::kOSRNestingLevelOffset),
+          Immediate(0));
 
   // Load initial bytecode offset.
   __ movq(kInterpreterBytecodeOffsetRegister,
@@ -2321,18 +2332,16 @@ void Generate_PushBoundArguments(MacroAssembler* masm) {
     //  -- rbx : the number of [[BoundArguments]] (checked to be non-zero)
     // -----------------------------------
 
-    // Reserve stack space for the [[BoundArguments]].
+    // Check the stack for overflow.
     {
       Label done;
-      __ leaq(kScratchRegister, Operand(rbx, times_system_pointer_size, 0));
-      __ subq(rsp, kScratchRegister);
-      // Check the stack for overflow. We are not trying to catch interruptions
-      // (i.e. debug break and preemption) here, so check the "real stack
-      // limit".
-      __ CompareRoot(rsp, RootIndex::kRealStackLimit);
+      __ shlq(rbx, Immediate(kSystemPointerSizeLog2));
+      __ movq(kScratchRegister, rsp);
+      __ subq(kScratchRegister, rbx);
+      // We are not trying to catch interruptions (i.e. debug break and
+      // preemption) here, so check the "real stack limit".
+      __ CompareRoot(kScratchRegister, RootIndex::kRealStackLimit);
       __ j(above_equal, &done, Label::kNear);
-      // Restore the stack pointer.
-      __ leaq(rsp, Operand(rsp, rbx, times_system_pointer_size, 0));
       {
         FrameScope scope(masm, StackFrame::MANUAL);
         __ EnterFrame(StackFrame::INTERNAL);
@@ -2341,6 +2350,10 @@ void Generate_PushBoundArguments(MacroAssembler* masm) {
       __ bind(&done);
     }
 
+    // Reserve stack space for the [[BoundArguments]].
+    __ movq(kScratchRegister, rbx);
+    __ AllocateStackSpace(kScratchRegister);
+
     // Adjust effective number of arguments to include return address.
     __ incl(rax);
 
@@ -2348,7 +2361,7 @@ void Generate_PushBoundArguments(MacroAssembler* masm) {
     {
       Label loop;
       __ Set(rcx, 0);
-      __ leaq(rbx, Operand(rsp, rbx, times_system_pointer_size, 0));
+      __ addq(rbx, rsp);
       __ bind(&loop);
       __ movq(kScratchRegister,
               Operand(rbx, rcx, times_system_pointer_size, 0));
@@ -2637,7 +2650,7 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     static_assert(WasmCompileLazyFrameConstants::kNumberOfSavedFpParamRegs ==
                       arraysize(wasm::kFpParamRegisters),
                   "frame size mismatch");
-    __ subq(rsp, Immediate(kSimd128Size * arraysize(wasm::kFpParamRegisters)));
+    __ AllocateStackSpace(kSimd128Size * arraysize(wasm::kFpParamRegisters));
     int offset = 0;
     for (DoubleRegister reg : wasm::kFpParamRegisters) {
       __ movdqu(Operand(rsp, offset), reg);

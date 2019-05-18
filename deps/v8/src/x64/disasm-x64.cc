@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <assert.h>
-#include <stdarg.h>
-#include <stdio.h>
+#include <cassert>
+#include <cinttypes>
+#include <cstdarg>
+#include <cstdio>
 
 #if V8_TARGET_ARCH_X64
 
@@ -673,7 +674,6 @@ int DisassemblerX64::PrintOperands(const char* mnem,
     }
     default:
       UNREACHABLE();
-      break;
   }
   return advance;
 }
@@ -1310,6 +1310,11 @@ int DisassemblerX64::AVXInstruction(byte* data) {
         break;
       case 0x54:
         AppendToBuffer("vandps %s,%s,", NameOfXMMRegister(regop),
+                       NameOfXMMRegister(vvvv));
+        current += PrintRightXMMOperand(current);
+        break;
+      case 0x55:
+        AppendToBuffer("vandnps %s,%s,", NameOfXMMRegister(regop),
                        NameOfXMMRegister(vvvv));
         current += PrintRightXMMOperand(current);
         break;
@@ -2800,8 +2805,7 @@ int DisassemblerX64::InstructionDecode(v8::internal::Vector<char> out_buffer,
     outp += v8::internal::SNPrintF(out_buffer + outp, "  ");
   }
 
-  outp += v8::internal::SNPrintF(out_buffer + outp, " %s",
-                                 tmp_buffer_.start());
+  outp += v8::internal::SNPrintF(out_buffer + outp, " %s", tmp_buffer_.begin());
   return instr_len;
 }
 
@@ -2829,7 +2833,7 @@ static const char* const xmm_regs[16] = {
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
   v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
-  return tmp_buffer_.start();
+  return tmp_buffer_.begin();
 }
 
 
@@ -2896,7 +2900,7 @@ void Disassembler::Disassemble(FILE* f, byte* begin, byte* end,
     for (int i = 6 - static_cast<int>(pc - prev_pc); i >= 0; i--) {
       fprintf(f, "  ");
     }
-    fprintf(f, "  %s\n", buffer.start());
+    fprintf(f, "  %s\n", buffer.begin());
   }
 }
 

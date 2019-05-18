@@ -24,28 +24,38 @@ class WasmCode;
 // Forward declarations.
 class AbstractCode;
 class FrameArray;
+class IncrementalStringBuilder;
 class JSMessageObject;
 class LookupIterator;
 class SharedFunctionInfo;
 class SourceInfo;
 class WasmInstanceObject;
 
-class MessageLocation {
+class V8_EXPORT_PRIVATE MessageLocation {
  public:
+  // Constructors for when source positions are already known.
+  // TODO(delphick): Collapse to a single constructor with a default parameter
+  // when we stop using the GCC that requires this separation.
   MessageLocation(Handle<Script> script, int start_pos, int end_pos);
   MessageLocation(Handle<Script> script, int start_pos, int end_pos,
                   Handle<SharedFunctionInfo> shared);
+  // Constructor for when source positions were not collected but which can be
+  // reconstructed from the SharedFuncitonInfo and bytecode offset.
+  MessageLocation(Handle<Script> script, Handle<SharedFunctionInfo> shared,
+                  int bytecode_offset);
   MessageLocation();
 
   Handle<Script> script() const { return script_; }
   int start_pos() const { return start_pos_; }
   int end_pos() const { return end_pos_; }
+  int bytecode_offset() const { return bytecode_offset_; }
   Handle<SharedFunctionInfo> shared() const { return shared_; }
 
  private:
   Handle<Script> script_;
   int start_pos_;
   int end_pos_;
+  int bytecode_offset_;
   Handle<SharedFunctionInfo> shared_;
 };
 
@@ -83,7 +93,8 @@ class StackFrameBase {
   virtual bool IsConstructor() = 0;
   virtual bool IsStrict() const = 0;
 
-  virtual MaybeHandle<String> ToString() = 0;
+  MaybeHandle<String> ToString();
+  virtual void ToString(IncrementalStringBuilder& builder) = 0;
 
   // Used to signal that the requested field is unknown.
   static const int kNone = -1;
@@ -127,7 +138,7 @@ class JSStackFrame : public StackFrameBase {
   bool IsConstructor() override { return is_constructor_; }
   bool IsStrict() const override { return is_strict_; }
 
-  MaybeHandle<String> ToString() override;
+  void ToString(IncrementalStringBuilder& builder) override;
 
  private:
   JSStackFrame() = default;
@@ -176,7 +187,7 @@ class WasmStackFrame : public StackFrameBase {
   bool IsStrict() const override { return false; }
   bool IsInterpreted() const { return code_ == nullptr; }
 
-  MaybeHandle<String> ToString() override;
+  void ToString(IncrementalStringBuilder& builder) override;
 
  protected:
   Handle<Object> Null() const;
@@ -211,7 +222,7 @@ class AsmJsWasmStackFrame : public WasmStackFrame {
   int GetLineNumber() override;
   int GetColumnNumber() override;
 
-  MaybeHandle<String> ToString() override;
+  void ToString(IncrementalStringBuilder& builder) override;
 
  private:
   friend class FrameArrayIterator;
@@ -277,14 +288,14 @@ class MessageFormatter {
  public:
   static const char* TemplateString(MessageTemplate index);
 
-  static MaybeHandle<String> FormatMessage(Isolate* isolate,
-                                           MessageTemplate index,
-                                           Handle<String> arg0,
-                                           Handle<String> arg1,
-                                           Handle<String> arg2);
+  V8_EXPORT_PRIVATE static MaybeHandle<String> Format(Isolate* isolate,
+                                                      MessageTemplate index,
+                                                      Handle<String> arg0,
+                                                      Handle<String> arg1,
+                                                      Handle<String> arg2);
 
-  static Handle<String> FormatMessage(Isolate* isolate, MessageTemplate index,
-                                      Handle<Object> arg);
+  static Handle<String> Format(Isolate* isolate, MessageTemplate index,
+                               Handle<Object> arg);
 };
 
 
@@ -293,13 +304,14 @@ class MessageFormatter {
 class MessageHandler {
  public:
   // Returns a message object for the API to use.
-  static Handle<JSMessageObject> MakeMessageObject(
+  V8_EXPORT_PRIVATE static Handle<JSMessageObject> MakeMessageObject(
       Isolate* isolate, MessageTemplate type, const MessageLocation* location,
       Handle<Object> argument, Handle<FixedArray> stack_frames);
 
   // Report a formatted message (needs JS allocation).
-  static void ReportMessage(Isolate* isolate, const MessageLocation* loc,
-                            Handle<JSMessageObject> message);
+  V8_EXPORT_PRIVATE static void ReportMessage(Isolate* isolate,
+                                              const MessageLocation* loc,
+                                              Handle<JSMessageObject> message);
 
   static void DefaultMessageReport(Isolate* isolate, const MessageLocation* loc,
                                    Handle<Object> message_obj);

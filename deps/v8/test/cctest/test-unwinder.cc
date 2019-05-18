@@ -4,7 +4,7 @@
 
 #include "include/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/heap/spaces.h"
 #include "src/isolate.h"
@@ -114,7 +114,8 @@ const char* foo_source = R"(
     let y = x ^ b;
     let z = y / a;
     return x + y - z;
-  }
+  };
+  %PrepareFunctionForOptimization(foo);
   foo(1, 2);
   foo(1, 2);
   %OptimizeFunctionOnNextCall(foo);
@@ -423,11 +424,13 @@ TEST(Unwind_StackBounds_WithUnwinding) {
                                                  stack_base);
   CHECK(!unwound);
 
-  // Change the return address so that it is not in range.
+  // Change the return address so that it is not in range. We will not range
+  // check the stack[9] FP value because we have finished unwinding and the
+  // contents of rbp does not necessarily have to be the FP in this case.
   stack[10] = 202;
   unwound = v8::Unwinder::TryUnwindV8Frames(unwind_state, &register_state,
                                             stack_base);
-  CHECK(!unwound);
+  CHECK(unwound);
 }
 
 TEST(PCIsInV8_BadState_Fail) {
@@ -482,8 +485,8 @@ TEST(PCIsInV8_InCodeOrEmbeddedRange) {
                       embedded_range_length);
 }
 
-// PCIsInV8 doesn't check if the PC is in JSEntrydirectly. It's assumed that the
-// CodeRange or EmbeddedCodeRange contain JSEntry.
+// PCIsInV8 doesn't check if the PC is in JSEntry directly. It's assumed that
+// the CodeRange or EmbeddedCodeRange contain JSEntry.
 TEST(PCIsInV8_InJSEntryRange) {
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
@@ -528,9 +531,8 @@ TEST(PCIsInV8_LargeCodeObject) {
   desc.unwinding_info = nullptr;
   desc.unwinding_info_size = 0;
   desc.origin = nullptr;
-  Handle<Object> self_ref;
   Handle<Code> foo_code =
-      i_isolate->factory()->NewCode(desc, Code::WASM_FUNCTION, self_ref);
+      Factory::CodeBuilder(i_isolate, desc, Code::WASM_FUNCTION).Build();
 
   CHECK(i_isolate->heap()->InSpace(*foo_code, CODE_LO_SPACE));
   byte* start = reinterpret_cast<byte*>(foo_code->InstructionStart());

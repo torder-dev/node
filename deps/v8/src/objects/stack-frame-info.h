@@ -27,8 +27,8 @@ class StackFrameInfo : public Struct {
   DECL_BOOLEAN_ACCESSORS(is_eval)
   DECL_BOOLEAN_ACCESSORS(is_constructor)
   DECL_BOOLEAN_ACCESSORS(is_wasm)
+  DECL_BOOLEAN_ACCESSORS(is_user_java_script)
   DECL_INT_ACCESSORS(flag)
-  DECL_INT_ACCESSORS(id)
 
   DECL_CAST(StackFrameInfo)
 
@@ -44,6 +44,7 @@ class StackFrameInfo : public Struct {
   static const int kIsEvalBit = 0;
   static const int kIsConstructorBit = 1;
   static const int kIsWasmBit = 2;
+  static const int kIsUserJavaScriptBit = 3;
 
   OBJECT_CONSTRUCTORS(StackFrameInfo, Struct);
 };
@@ -67,17 +68,8 @@ class StackTraceFrame : public Struct {
   DECL_PRINTER(StackTraceFrame)
   DECL_VERIFIER(StackTraceFrame)
 
-  // Layout description.
-#define STACK_FRAME_FIELDS(V)       \
-  V(kFrameArrayOffset, kTaggedSize) \
-  V(kFrameIndexOffset, kTaggedSize) \
-  V(kFrameInfoOffset, kTaggedSize)  \
-  V(kIdOffset, kTaggedSize)         \
-  /* Total size. */                 \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(Struct::kHeaderSize, STACK_FRAME_FIELDS)
-#undef STACK_FRAME_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(Struct::kHeaderSize,
+                                TORQUE_GENERATED_STACK_TRACE_FRAME_FIELDS)
 
   static int GetLineNumber(Handle<StackTraceFrame> frame);
   static int GetColumnNumber(Handle<StackTraceFrame> frame);
@@ -90,6 +82,7 @@ class StackTraceFrame : public Struct {
   static bool IsEval(Handle<StackTraceFrame> frame);
   static bool IsConstructor(Handle<StackTraceFrame> frame);
   static bool IsWasm(Handle<StackTraceFrame> frame);
+  static bool IsUserJavaScript(Handle<StackTraceFrame> frame);
 
  private:
   OBJECT_CONSTRUCTORS(StackTraceFrame, Struct);

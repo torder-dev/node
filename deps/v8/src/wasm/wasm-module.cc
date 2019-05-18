@@ -5,7 +5,7 @@
 #include <functional>
 #include <memory>
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/assembler-inl.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/debug/interface-types.h"
@@ -26,6 +26,9 @@
 namespace v8 {
 namespace internal {
 namespace wasm {
+
+// static
+const uint32_t WasmElemSegment::kNullIndex;
 
 WireBytesRef WasmModule::LookupFunctionName(const ModuleWireBytes& wire_bytes,
                                             uint32_t function_index) const {
@@ -63,10 +66,10 @@ WasmName ModuleWireBytes::GetNameOrNull(const WasmFunction* function,
 
 std::ostream& operator<<(std::ostream& os, const WasmFunctionName& name) {
   os << "#" << name.function_->func_index;
-  if (!name.name_.is_empty()) {
-    if (name.name_.start()) {
+  if (!name.name_.empty()) {
+    if (name.name_.begin()) {
       os << ":";
-      os.write(name.name_.start(), name.name_.length());
+      os.write(name.name_.begin(), name.name_.length());
     }
   } else {
     os << "?";
@@ -239,7 +242,7 @@ Handle<JSArray> GetCustomSections(Isolate* isolate,
   Vector<const uint8_t> wire_bytes =
       module_object->native_module()->wire_bytes();
   std::vector<CustomSectionOffset> custom_sections =
-      DecodeCustomSections(wire_bytes.start(), wire_bytes.end());
+      DecodeCustomSections(wire_bytes.begin(), wire_bytes.end());
 
   std::vector<Handle<Object>> matching_sections;
 
@@ -264,7 +267,7 @@ Handle<JSArray> GetCustomSections(Isolate* isolate,
         isolate->factory()->NewJSArrayBuffer(SharedFlag::kNotShared);
     constexpr bool is_external = false;
     JSArrayBuffer::Setup(buffer, isolate, is_external, memory, size);
-    memcpy(memory, wire_bytes.start() + section.payload.offset(),
+    memcpy(memory, wire_bytes.begin() + section.payload.offset(),
            section.payload.length());
 
     matching_sections.push_back(buffer);
@@ -288,7 +291,7 @@ Handle<FixedArray> DecodeLocalNames(Isolate* isolate,
   Vector<const uint8_t> wire_bytes =
       module_object->native_module()->wire_bytes();
   LocalNames decoded_locals;
-  DecodeLocalNames(wire_bytes.start(), wire_bytes.end(), &decoded_locals);
+  DecodeLocalNames(wire_bytes.begin(), wire_bytes.end(), &decoded_locals);
   Handle<FixedArray> locals_names =
       isolate->factory()->NewFixedArray(decoded_locals.max_function_index + 1);
   for (LocalNamesPerFunction& func : decoded_locals.names) {

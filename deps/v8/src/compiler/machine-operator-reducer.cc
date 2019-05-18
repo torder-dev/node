@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/compiler/machine-operator-reducer.h"
+#include <cmath>
 
 #include "src/base/bits.h"
 #include "src/base/division-by-constant.h"
@@ -13,7 +14,7 @@
 #include "src/compiler/machine-graph.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
-#include "src/conversions-inl.h"
+#include "src/numbers/conversions-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -173,8 +174,8 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
       Int32BinopMatcher m(node);
       if (m.right().Is(0)) return Replace(m.left().node());  // x ror 0 => x
       if (m.IsFoldable()) {                                  // K ror K => K
-        return ReplaceInt32(
-            base::bits::RotateRight32(m.left().Value(), m.right().Value()));
+        return ReplaceInt32(base::bits::RotateRight32(m.left().Value(),
+                                                      m.right().Value() & 31));
       }
       break;
     }
@@ -323,7 +324,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat32Sub: {
       Float32BinopMatcher m(node);
       if (allow_signalling_nan_ && m.right().Is(0) &&
-          (copysign(1.0, m.right().Value()) > 0)) {
+          (std::copysign(1.0, m.right().Value()) > 0)) {
         return Replace(m.left().node());  // x - 0 => x
       }
       if (m.right().IsNaN()) {  // x - NaN => NaN

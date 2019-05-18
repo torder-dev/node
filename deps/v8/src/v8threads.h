@@ -5,6 +5,8 @@
 #ifndef V8_V8THREADS_H_
 #define V8_V8THREADS_H_
 
+#include <atomic>
+
 #include "src/isolate.h"
 
 namespace v8 {
@@ -27,12 +29,6 @@ class ThreadState {
   void set_id(ThreadId id) { id_ = id; }
   ThreadId id() { return id_; }
 
-  // Should the thread be terminated when it is restored?
-  bool terminate_on_restore() { return terminate_on_restore_; }
-  void set_terminate_on_restore(bool terminate_on_restore) {
-    terminate_on_restore_ = terminate_on_restore;
-  }
-
   // Get data area for archiving a thread.
   char* data() { return data_; }
 
@@ -43,7 +39,6 @@ class ThreadState {
   void AllocateSpace();
 
   ThreadId id_;
-  bool terminate_on_restore_;
   char* data_;
   ThreadState* next_;
   ThreadState* previous_;
@@ -75,13 +70,11 @@ class ThreadManager {
 
   void Iterate(RootVisitor* v);
   void IterateArchivedThreads(ThreadVisitor* v);
-  bool IsLockedByCurrentThread() {
-    return mutex_owner_.Equals(ThreadId::Current());
+  bool IsLockedByCurrentThread() const {
+    return mutex_owner_.load(std::memory_order_relaxed) == ThreadId::Current();
   }
 
   ThreadId CurrentId();
-
-  void TerminateExecution(ThreadId thread_id);
 
   // Iterate over in-use states.
   ThreadState* FirstThreadStateInUse();
@@ -96,7 +89,9 @@ class ThreadManager {
   void EagerlyArchiveThread();
 
   base::Mutex mutex_;
-  ThreadId mutex_owner_;
+  // {ThreadId} must be trivially copyable to be stored in {std::atomic}.
+  ASSERT_TRIVIALLY_COPYABLE(i::ThreadId);
+  std::atomic<ThreadId> mutex_owner_;
   ThreadId lazily_archived_thread_;
   ThreadState* lazily_archived_thread_state_;
 

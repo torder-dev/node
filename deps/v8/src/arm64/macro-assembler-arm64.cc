@@ -7,7 +7,6 @@
 #include "src/assembler.h"
 #include "src/base/bits.h"
 #include "src/base/division-by-constant.h"
-#include "src/bootstrapper.h"
 #include "src/callable.h"
 #include "src/code-factory.h"
 #include "src/counters.h"
@@ -16,6 +15,7 @@
 #include "src/frame-constants.h"
 #include "src/frames-inl.h"
 #include "src/heap/heap-inl.h"  // For MemoryChunk.
+#include "src/init/bootstrapper.h"
 #include "src/macro-assembler-inl.h"
 #include "src/register-configuration.h"
 #include "src/runtime/runtime.h"
@@ -40,25 +40,11 @@ CPURegList TurboAssembler::DefaultFPTmpList() {
 
 int TurboAssembler::RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
                                                     Register exclusion) const {
-  int bytes = 0;
   auto list = kCallerSaved;
-  // We only allow one exclusion register, so if the list is of even length
-  // before exclusions, it must still be afterwards, to maintain alignment.
-  // Therefore, we can ignore the exclusion register in the computation.
-  // However, we leave it in the argument list to mirror the prototype for
-  // Push/PopCallerSaved().
+  list.Remove(exclusion);
+  list.Align();
 
-  // X18 is excluded from caller-saved register list on ARM64 which makes
-  // caller-saved registers in odd number. padreg is used accordingly to
-  // maintain the alignment.
-  DCHECK_EQ(list.Count() % 2, 1);
-  if (exclusion.Is(no_reg)) {
-    bytes += kXRegSizeInBits / 8;
-  } else {
-    bytes -= kXRegSizeInBits / 8;
-  }
-
-  bytes += list.Count() * kXRegSizeInBits / 8;
+  int bytes = list.Count() * kXRegSizeInBits / 8;
 
   if (fp_mode == kSaveFPRegs) {
     DCHECK_EQ(kCallerSavedV.Count() % 2, 0);
@@ -69,20 +55,13 @@ int TurboAssembler::RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
 
 int TurboAssembler::PushCallerSaved(SaveFPRegsMode fp_mode,
                                     Register exclusion) {
-  int bytes = 0;
   auto list = kCallerSaved;
+  list.Remove(exclusion);
+  list.Align();
 
-  // X18 is excluded from caller-saved register list on ARM64, use padreg
-  // accordingly to maintain alignment.
-  if (!exclusion.Is(no_reg)) {
-    list.Remove(exclusion);
-  } else {
-    list.Combine(padreg);
-  }
-
-  DCHECK_EQ(list.Count() % 2, 0);
   PushCPURegList(list);
-  bytes += list.Count() * kXRegSizeInBits / 8;
+
+  int bytes = list.Count() * kXRegSizeInBits / 8;
 
   if (fp_mode == kSaveFPRegs) {
     DCHECK_EQ(kCallerSavedV.Count() % 2, 0);
@@ -101,16 +80,9 @@ int TurboAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion) {
   }
 
   auto list = kCallerSaved;
+  list.Remove(exclusion);
+  list.Align();
 
-  // X18 is excluded from caller-saved register list on ARM64, use padreg
-  // accordingly to maintain alignment.
-  if (!exclusion.Is(no_reg)) {
-    list.Remove(exclusion);
-  } else {
-    list.Combine(padreg);
-  }
-
-  DCHECK_EQ(list.Count() % 2, 0);
   PopCPURegList(list);
   bytes += list.Count() * kXRegSizeInBits / 8;
 
@@ -319,7 +291,8 @@ void TurboAssembler::Mov(const Register& rd, const Operand& operand,
           ExternalReference reference = bit_cast<ExternalReference>(addr);
           IndirectLoadExternalReference(rd, reference);
           return;
-        } else if (operand.ImmediateRMode() == RelocInfo::EMBEDDED_OBJECT) {
+        } else if (operand.ImmediateRMode() ==
+                   RelocInfo::FULL_EMBEDDED_OBJECT) {
           Handle<HeapObject> x(
               reinterpret_cast<Address*>(operand.ImmediateValue()));
           IndirectLoadConstant(rd, x);
@@ -2564,14 +2537,10 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, const Register& scratch,
   Mov(fp, sp);
   Mov(scratch, StackFrame::TypeToMarker(frame_type));
   Push(scratch, xzr);
-  Mov(scratch, CodeObject());
-  Push(scratch, padreg);
   //          fp[8]: CallerPC (lr)
   //    fp -> fp[0]: CallerFP (old fp)
   //          fp[-8]: STUB marker
-  //          fp[-16]: Space reserved for SPOffset.
-  //          fp[-24]: CodeObject()
-  //    sp -> fp[-32]: padding
+  //    sp -> fp[-16]: Space reserved for SPOffset.
   STATIC_ASSERT((2 * kSystemPointerSize) ==
                 ExitFrameConstants::kCallerSPOffset);
   STATIC_ASSERT((1 * kSystemPointerSize) ==
@@ -2579,9 +2548,6 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, const Register& scratch,
   STATIC_ASSERT((0 * kSystemPointerSize) ==
                 ExitFrameConstants::kCallerFPOffset);
   STATIC_ASSERT((-2 * kSystemPointerSize) == ExitFrameConstants::kSPOffset);
-  STATIC_ASSERT((-3 * kSystemPointerSize) == ExitFrameConstants::kCodeOffset);
-  STATIC_ASSERT((-4 * kSystemPointerSize) ==
-                ExitFrameConstants::kPaddingOffset);
 
   // Save the frame pointer and context pointer in the top frame.
   Mov(scratch,
@@ -2591,7 +2557,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, const Register& scratch,
       ExternalReference::Create(IsolateAddressId::kContextAddress, isolate()));
   Str(cp, MemOperand(scratch));
 
-  STATIC_ASSERT((-4 * kSystemPointerSize) ==
+  STATIC_ASSERT((-2 * kSystemPointerSize) ==
                 ExitFrameConstants::kLastExitFrameField);
   if (save_doubles) {
     ExitFramePreserveFPRegs();
@@ -2608,8 +2574,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, const Register& scratch,
   //   fp -> fp[0]: CallerFP (old fp)
   //         fp[-8]: STUB marker
   //         fp[-16]: Space reserved for SPOffset.
-  //         fp[-24]: CodeObject()
-  //         fp[-24 - fp_size]: Saved doubles (if save_doubles is true).
+  //         fp[-16 - fp_size]: Saved doubles (if save_doubles is true).
   //         sp[8]: Extra space reserved for caller (if extra_space != 0).
   //   sp -> sp[0]: Space reserved for the return address.
 
@@ -2671,6 +2636,9 @@ void MacroAssembler::IncrementCounter(StatsCounter* counter, int value,
                                       Register scratch1, Register scratch2) {
   DCHECK_NE(value, 0);
   if (FLAG_native_code_counters && counter->Enabled()) {
+    // This operation has to be exactly 32-bit wide in case the external
+    // reference table redirects the counter to a uint32_t dummy_stats_counter_
+    // field.
     Mov(scratch2, ExternalReference::Create(counter));
     Ldr(scratch1.W(), MemOperand(scratch2));
     Add(scratch1.W(), scratch1.W(), value);
@@ -2806,6 +2774,13 @@ void TurboAssembler::DecompressTaggedSigned(const Register& destination,
   RecordComment("]");
 }
 
+void TurboAssembler::DecompressTaggedSigned(const Register& destination,
+                                            const Register& source) {
+  RecordComment("[ DecompressTaggedSigned");
+  Sxtw(destination, source);
+  RecordComment("]");
+}
+
 void TurboAssembler::DecompressTaggedPointer(const Register& destination,
                                              const MemOperand& field_operand) {
   RecordComment("[ DecompressTaggedPointer");
@@ -2814,21 +2789,60 @@ void TurboAssembler::DecompressTaggedPointer(const Register& destination,
   RecordComment("]");
 }
 
+void TurboAssembler::DecompressTaggedPointer(const Register& destination,
+                                             const Register& source) {
+  RecordComment("[ DecompressTaggedPointer");
+  Add(destination, kRootRegister, Operand(source, SXTW));
+  RecordComment("]");
+}
+
 void TurboAssembler::DecompressAnyTagged(const Register& destination,
                                          const MemOperand& field_operand) {
   RecordComment("[ DecompressAnyTagged");
-  UseScratchRegisterScope temps(this);
   Ldrsw(destination, field_operand);
-  // Branchlessly compute |masked_root|:
-  // masked_root = HAS_SMI_TAG(destination) ? 0 : kRootRegister;
-  STATIC_ASSERT((kSmiTagSize == 1) && (kSmiTag == 0));
-  Register masked_root = temps.AcquireX();
-  // Sign extend tag bit to entire register.
-  Sbfx(masked_root, destination, 0, kSmiTagSize);
-  And(masked_root, masked_root, kRootRegister);
-  // Now this add operation will either leave the value unchanged if it is a smi
-  // or add the isolate root if it is a heap object.
-  Add(destination, masked_root, destination);
+  if (kUseBranchlessPtrDecompression) {
+    UseScratchRegisterScope temps(this);
+    // Branchlessly compute |masked_root|:
+    // masked_root = HAS_SMI_TAG(destination) ? 0 : kRootRegister;
+    STATIC_ASSERT((kSmiTagSize == 1) && (kSmiTag == 0));
+    Register masked_root = temps.AcquireX();
+    // Sign extend tag bit to entire register.
+    Sbfx(masked_root, destination, 0, kSmiTagSize);
+    And(masked_root, masked_root, kRootRegister);
+    // Now this add operation will either leave the value unchanged if it is a
+    // smi or add the isolate root if it is a heap object.
+    Add(destination, masked_root, destination);
+  } else {
+    Label done;
+    JumpIfSmi(destination, &done);
+    Add(destination, kRootRegister, destination);
+    bind(&done);
+  }
+  RecordComment("]");
+}
+
+void TurboAssembler::DecompressAnyTagged(const Register& destination,
+                                         const Register& source) {
+  RecordComment("[ DecompressAnyTagged");
+  if (kUseBranchlessPtrDecompression) {
+    UseScratchRegisterScope temps(this);
+    // Branchlessly compute |masked_root|:
+    // masked_root = HAS_SMI_TAG(destination) ? 0 : kRootRegister;
+    STATIC_ASSERT((kSmiTagSize == 1) && (kSmiTag == 0));
+    Register masked_root = temps.AcquireX();
+    // Sign extend tag bit to entire register.
+    Sbfx(masked_root, source, 0, kSmiTagSize);
+    And(masked_root, masked_root, kRootRegister);
+    // Now this add operation will either leave the value unchanged if it is a
+    // smi or add the isolate root if it is a heap object.
+    Add(destination, masked_root, Operand(source, SXTW));
+  } else {
+    Label done;
+    Sxtw(destination, source);
+    JumpIfSmi(destination, &done);
+    Add(destination, kRootRegister, destination);
+    bind(&done);
+  }
   RecordComment("]");
 }
 
@@ -2917,36 +2931,22 @@ int MacroAssembler::SafepointRegisterStackIndex(int reg_code) {
   }
 }
 
-void MacroAssembler::CheckPageFlag(const Register& object,
-                                   const Register& scratch, int mask,
+void TurboAssembler::CheckPageFlag(const Register& object, int mask,
                                    Condition cc, Label* condition_met) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
   And(scratch, object, ~kPageAlignmentMask);
   Ldr(scratch, MemOperand(scratch, MemoryChunk::kFlagsOffset));
   if (cc == eq) {
     TestAndBranchIfAnySet(scratch, mask, condition_met);
   } else {
+    DCHECK_EQ(cc, ne);
     TestAndBranchIfAllClear(scratch, mask, condition_met);
   }
 }
 
-void TurboAssembler::CheckPageFlagSet(const Register& object,
-                                      const Register& scratch, int mask,
-                                      Label* if_any_set) {
-  And(scratch, object, ~kPageAlignmentMask);
-  Ldr(scratch, MemOperand(scratch, MemoryChunk::kFlagsOffset));
-  TestAndBranchIfAnySet(scratch, mask, if_any_set);
-}
-
-void TurboAssembler::CheckPageFlagClear(const Register& object,
-                                        const Register& scratch, int mask,
-                                        Label* if_all_clear) {
-  And(scratch, object, ~kPageAlignmentMask);
-  Ldr(scratch, MemOperand(scratch, MemoryChunk::kFlagsOffset));
-  TestAndBranchIfAllClear(scratch, mask, if_all_clear);
-}
-
 void MacroAssembler::RecordWriteField(Register object, int offset,
-                                      Register value, Register scratch,
+                                      Register value,
                                       LinkRegisterStatus lr_status,
                                       SaveFPRegsMode save_fp,
                                       RememberedSetAction remembered_set_action,
@@ -2964,26 +2964,21 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   // of the object, so offset must be a multiple of kTaggedSize.
   DCHECK(IsAligned(offset, kTaggedSize));
 
-  Add(scratch, object, offset - kHeapObjectTag);
   if (emit_debug_code()) {
     Label ok;
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.AcquireX();
+    Add(scratch, object, offset - kHeapObjectTag);
     Tst(scratch, kTaggedSize - 1);
     B(eq, &ok);
     Abort(AbortReason::kUnalignedCellInWriteBarrier);
     Bind(&ok);
   }
 
-  RecordWrite(object, scratch, value, lr_status, save_fp, remembered_set_action,
-              OMIT_SMI_CHECK);
+  RecordWrite(object, Operand(offset - kHeapObjectTag), value, lr_status,
+              save_fp, remembered_set_action, OMIT_SMI_CHECK);
 
   Bind(&done);
-
-  // Clobber clobbered input registers when running with the debug-code flag
-  // turned on to provoke errors.
-  if (emit_debug_code()) {
-    Mov(value, Operand(bit_cast<int64_t>(kZapValue + 4)));
-    Mov(scratch, Operand(bit_cast<int64_t>(kZapValue + 8)));
-  }
 }
 
 void TurboAssembler::SaveRegisters(RegList registers) {
@@ -3010,27 +3005,47 @@ void TurboAssembler::RestoreRegisters(RegList registers) {
   PopCPURegList(regs);
 }
 
+void TurboAssembler::CallEphemeronKeyBarrier(Register object, Operand offset,
+                                             SaveFPRegsMode fp_mode) {
+  EphemeronKeyBarrierDescriptor descriptor;
+  RegList registers = descriptor.allocatable_registers();
+
+  SaveRegisters(registers);
+
+  Register object_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kObject));
+  Register slot_parameter(descriptor.GetRegisterParameter(
+      EphemeronKeyBarrierDescriptor::kSlotAddress));
+  Register fp_mode_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kFPMode));
+
+  MoveObjectAndSlot(object_parameter, slot_parameter, object, offset);
+
+  Mov(fp_mode_parameter, Smi::FromEnum(fp_mode));
+  Call(isolate()->builtins()->builtin_handle(Builtins::kEphemeronKeyBarrier),
+       RelocInfo::CODE_TARGET);
+  RestoreRegisters(registers);
+}
+
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode) {
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode) {
   CallRecordWriteStub(
-      object, address, remembered_set_action, fp_mode,
+      object, offset, remembered_set_action, fp_mode,
       isolate()->builtins()->builtin_handle(Builtins::kRecordWrite),
       kNullAddress);
 }
 
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    Address wasm_target) {
-  CallRecordWriteStub(object, address, remembered_set_action, fp_mode,
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode, Address wasm_target) {
+  CallRecordWriteStub(object, offset, remembered_set_action, fp_mode,
                       Handle<Code>::null(), wasm_target);
 }
 
 void TurboAssembler::CallRecordWriteStub(
-    Register object, Register address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    Handle<Code> code_target, Address wasm_target) {
+    Register object, Operand offset, RememberedSetAction remembered_set_action,
+    SaveFPRegsMode fp_mode, Handle<Code> code_target, Address wasm_target) {
   DCHECK_NE(code_target.is_null(), wasm_target == kNullAddress);
   // TODO(albertnetymk): For now we ignore remembered_set_action and fp_mode,
   // i.e. always emit remember set and save FP registers in RecordWriteStub. If
@@ -3051,7 +3066,7 @@ void TurboAssembler::CallRecordWriteStub(
   Register fp_mode_parameter(
       descriptor.GetRegisterParameter(RecordWriteDescriptor::kFPMode));
 
-  MovePair(object_parameter, object, slot_parameter, address);
+  MoveObjectAndSlot(object_parameter, slot_parameter, object, offset);
 
   Mov(remembered_set_parameter, Smi::FromEnum(remembered_set_action));
   Mov(fp_mode_parameter, Smi::FromEnum(fp_mode));
@@ -3064,12 +3079,44 @@ void TurboAssembler::CallRecordWriteStub(
   RestoreRegisters(registers);
 }
 
-// Will clobber: object, address, value.
-// If lr_status is kLRHasBeenSaved, lr will also be clobbered.
+void TurboAssembler::MoveObjectAndSlot(Register dst_object, Register dst_slot,
+                                       Register object, Operand offset) {
+  DCHECK_NE(dst_object, dst_slot);
+  // If `offset` is a register, it cannot overlap with `object`.
+  DCHECK_IMPLIES(!offset.IsImmediate(), offset.reg() != object);
+
+  // If the slot register does not overlap with the object register, we can
+  // overwrite it.
+  if (dst_slot != object) {
+    Add(dst_slot, object, offset);
+    Mov(dst_object, object);
+    return;
+  }
+
+  DCHECK_EQ(dst_slot, object);
+
+  // If the destination object register does not overlap with the offset
+  // register, we can overwrite it.
+  if (offset.IsImmediate() || (offset.reg() != dst_object)) {
+    Mov(dst_object, dst_slot);
+    Add(dst_slot, dst_slot, offset);
+    return;
+  }
+
+  DCHECK_EQ(dst_object, offset.reg());
+
+  // We only have `dst_slot` and `dst_object` left as distinct registers so we
+  // have to swap them. We write this as a add+sub sequence to avoid using a
+  // scratch register.
+  Add(dst_slot, dst_slot, dst_object);
+  Sub(dst_object, dst_slot, dst_object);
+}
+
+// If lr_status is kLRHasBeenSaved, lr will be clobbered.
 //
 // The register 'object' contains a heap object pointer. The heap object tag is
 // shifted away.
-void MacroAssembler::RecordWrite(Register object, Register address,
+void MacroAssembler::RecordWrite(Register object, Operand offset,
                                  Register value, LinkRegisterStatus lr_status,
                                  SaveFPRegsMode fp_mode,
                                  RememberedSetAction remembered_set_action,
@@ -3081,7 +3128,8 @@ void MacroAssembler::RecordWrite(Register object, Register address,
     UseScratchRegisterScope temps(this);
     Register temp = temps.AcquireX();
 
-    LoadTaggedPointerField(temp, MemOperand(address));
+    Add(temp, object, offset);
+    LoadTaggedPointerField(temp, MemOperand(temp));
     Cmp(temp, value);
     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
   }
@@ -3094,37 +3142,22 @@ void MacroAssembler::RecordWrite(Register object, Register address,
     DCHECK_EQ(0, kSmiTag);
     JumpIfSmi(value, &done);
   }
+  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, ne,
+                &done);
 
-  CheckPageFlagClear(value,
-                     value,  // Used as scratch.
-                     MemoryChunk::kPointersToHereAreInterestingMask, &done);
-  CheckPageFlagClear(object,
-                     value,  // Used as scratch.
-                     MemoryChunk::kPointersFromHereAreInterestingMask,
-                     &done);
+  CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                &done);
 
   // Record the actual write.
   if (lr_status == kLRHasNotBeenSaved) {
     Push(padreg, lr);
   }
-  CallRecordWriteStub(object, address, remembered_set_action, fp_mode);
+  CallRecordWriteStub(object, offset, remembered_set_action, fp_mode);
   if (lr_status == kLRHasNotBeenSaved) {
     Pop(lr, padreg);
   }
 
   Bind(&done);
-
-  // Count number of write barriers in generated code.
-  isolate()->counters()->write_barriers_static()->Increment();
-  IncrementCounter(isolate()->counters()->write_barriers_dynamic(), 1, address,
-                   value);
-
-  // Clobber clobbered registers when running with the debug-code flag
-  // turned on to provoke errors.
-  if (emit_debug_code()) {
-    Mov(address, Operand(bit_cast<int64_t>(kZapValue + 12)));
-    Mov(value, Operand(bit_cast<int64_t>(kZapValue + 16)));
-  }
 }
 
 void TurboAssembler::Assert(Condition cond, AbortReason reason) {
@@ -3368,11 +3401,8 @@ void MacroAssembler::Printf(const char * format,
   TmpList()->set_list(0);
   FPTmpList()->set_list(0);
 
-  // x18 is the platform register and is reserved for the use of platform ABIs.
-  // It is not part of the kCallerSaved list, but we add it here anyway to
-  // ensure `reg_list.Count() % 2 == 0` which is required in multiple spots.
   CPURegList saved_registers = kCallerSaved;
-  saved_registers.Combine(x18.code());
+  saved_registers.Align();
 
   // Preserve all caller-saved registers as well as NZCV.
   // PushCPURegList asserts that the size of each list is a multiple of 16

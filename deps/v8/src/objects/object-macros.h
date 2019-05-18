@@ -290,9 +290,18 @@
     GenerationalBarrier(object, (object)->RawMaybeWeakField(offset), value); \
   } while (false)
 
+#define EPHEMERON_KEY_WRITE_BARRIER(object, offset, value)                     \
+  do {                                                                         \
+    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                        \
+    EphemeronHashTable table = EphemeronHashTable::cast(object);               \
+    MarkingBarrier(object, (object)->RawField(offset), value);                 \
+    GenerationalEphemeronKeyBarrier(table, (object)->RawField(offset), value); \
+  } while (false)
+
 #define CONDITIONAL_WRITE_BARRIER(object, offset, value, mode)        \
   do {                                                                \
     DCHECK_NOT_NULL(GetHeapFromWritableObject(object));               \
+    DCHECK_NE(mode, UPDATE_EPHEMERON_KEY_WRITE_BARRIER);              \
     if (mode != SKIP_WRITE_BARRIER) {                                 \
       if (mode == UPDATE_WRITE_BARRIER) {                             \
         MarkingBarrier(object, (object)->RawField(offset), value);    \
@@ -304,12 +313,27 @@
 #define CONDITIONAL_WEAK_WRITE_BARRIER(object, offset, value, mode)            \
   do {                                                                         \
     DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                        \
+    DCHECK_NE(mode, UPDATE_EPHEMERON_KEY_WRITE_BARRIER);                       \
     if (mode != SKIP_WRITE_BARRIER) {                                          \
       if (mode == UPDATE_WRITE_BARRIER) {                                      \
         MarkingBarrier(object, (object)->RawMaybeWeakField(offset), value);    \
       }                                                                        \
       GenerationalBarrier(object, (object)->RawMaybeWeakField(offset), value); \
     }                                                                          \
+  } while (false)
+
+#define CONDITIONAL_EPHEMERON_KEY_WRITE_BARRIER(object, offset, value, mode) \
+  do {                                                                       \
+    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                      \
+    DCHECK_NE(mode, UPDATE_EPHEMERON_KEY_WRITE_BARRIER);                     \
+    EphemeronHashTable table = EphemeronHashTable::cast(object);             \
+    if (mode != SKIP_WRITE_BARRIER) {                                        \
+      if (mode == UPDATE_WRITE_BARRIER) {                                    \
+        MarkingBarrier(object, (object)->RawField(offset), value);           \
+      }                                                                      \
+      GenerationalEphemeronKeyBarrier(table, (object)->RawField(offset),     \
+                                      value);                                \
+    }                                                                        \
   } while (false)
 
 #define READ_DOUBLE_FIELD(p, offset) ReadDoubleValue(FIELD_ADDR(p, offset))
@@ -469,10 +493,19 @@
   base::Relaxed_Store(reinterpret_cast<base::Atomic8*>(FIELD_ADDR(p, offset)), \
                       static_cast<base::Atomic8>(value));
 
+#ifdef OBJECT_PRINT
+#define DECL_PRINTER(Name) void Name##Print(std::ostream& os);  // NOLINT
+#else
+#define DECL_PRINTER(Name)
+#endif
+
 #ifdef VERIFY_HEAP
 #define DECL_VERIFIER(Name) void Name##Verify(Isolate* isolate);
+#define EXPORT_DECL_VERIFIER(Name) \
+  V8_EXPORT_PRIVATE void Name##Verify(Isolate* isolate);
 #else
 #define DECL_VERIFIER(Name)
+#define EXPORT_DECL_VERIFIER(Name)
 #endif
 
 #define DEFINE_DEOPT_ELEMENT_ACCESSORS(name, type) \
@@ -488,3 +521,15 @@
   void DeoptimizationData::Set##name(int i, type value) {       \
     set(IndexForEntry(i) + k##name##Offset, value);             \
   }
+
+#define TQ_OBJECT_CONSTRUCTORS(Type) \
+ public:                             \
+  constexpr Type() = default;        \
+                                     \
+ protected:                          \
+  inline explicit Type(Address ptr); \
+  friend class TorqueGenerated##Type<Type, Super>;
+
+#define TQ_OBJECT_CONSTRUCTORS_IMPL(Type) \
+  inline Type::Type(Address ptr)          \
+      : TorqueGenerated##Type<Type, Type::Super>(ptr) {}

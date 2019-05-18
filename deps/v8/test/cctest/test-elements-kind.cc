@@ -37,7 +37,7 @@ Handle<String> MakeString(const char* str) {
 Handle<String> MakeName(const char* str, int suffix) {
   EmbeddedVector<char, 128> buffer;
   SNPrintF(buffer, "%s%d", str, suffix);
-  return MakeString(buffer.start());
+  return MakeString(buffer.begin());
 }
 
 template <typename T, typename M>
@@ -56,6 +56,41 @@ bool EQUALS(Isolate* isolate, Handle<T> left, M right) {
 template <typename T, typename M>
 bool EQUALS(Isolate* isolate, T left, Handle<M> right) {
   return EQUALS(isolate, handle(left, isolate), right);
+}
+
+bool ElementsKindIsHoleyElementsKindForRead(ElementsKind kind) {
+  switch (kind) {
+    case ElementsKind::HOLEY_SMI_ELEMENTS:
+    case ElementsKind::HOLEY_ELEMENTS:
+    case ElementsKind::HOLEY_DOUBLE_ELEMENTS:
+    case ElementsKind::HOLEY_SEALED_ELEMENTS:
+    case ElementsKind::HOLEY_FROZEN_ELEMENTS:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ElementsKindIsHoleyElementsKind(ElementsKind kind) {
+  switch (kind) {
+    case ElementsKind::HOLEY_SMI_ELEMENTS:
+    case ElementsKind::HOLEY_ELEMENTS:
+    case ElementsKind::HOLEY_DOUBLE_ELEMENTS:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ElementsKindIsFastPackedElementsKind(ElementsKind kind) {
+  switch (kind) {
+    case ElementsKind::PACKED_SMI_ELEMENTS:
+    case ElementsKind::PACKED_ELEMENTS:
+    case ElementsKind::PACKED_DOUBLE_ELEMENTS:
+      return true;
+    default:
+      return false;
+  }
 }
 
 }  // namespace
@@ -486,6 +521,29 @@ TEST(JSArrayAddingElementsGeneralizingiFastDoubleElements) {
                                                     NONE)
       .Check();
   CHECK_EQ(array->map(), *previous_map);
+}
+
+TEST(IsHoleyElementsKindForRead) {
+  for (int i = 0; i <= ElementsKind::LAST_ELEMENTS_KIND; i++) {
+    ElementsKind kind = static_cast<ElementsKind>(i);
+    CHECK_EQ(ElementsKindIsHoleyElementsKindForRead(kind),
+             IsHoleyElementsKindForRead(kind));
+  }
+}
+
+TEST(IsHoleyElementsKind) {
+  for (int i = 0; i <= ElementsKind::LAST_ELEMENTS_KIND; i++) {
+    ElementsKind kind = static_cast<ElementsKind>(i);
+    CHECK_EQ(ElementsKindIsHoleyElementsKind(kind), IsHoleyElementsKind(kind));
+  }
+}
+
+TEST(IsFastPackedElementsKind) {
+  for (int i = 0; i <= ElementsKind::LAST_ELEMENTS_KIND; i++) {
+    ElementsKind kind = static_cast<ElementsKind>(i);
+    CHECK_EQ(ElementsKindIsFastPackedElementsKind(kind),
+             IsFastPackedElementsKind(kind));
+  }
 }
 
 }  // namespace test_elements_kind

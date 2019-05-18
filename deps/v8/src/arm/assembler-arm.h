@@ -48,7 +48,7 @@
 #include "src/assembler.h"
 #include "src/boxed-float.h"
 #include "src/constant-pool.h"
-#include "src/double.h"
+#include "src/numbers/double.h"
 
 namespace v8 {
 namespace internal {
@@ -79,11 +79,14 @@ enum Coprocessor {
 // Machine instruction Operands
 
 // Class Operand represents a shifter operand in data processing instructions
-class Operand {
+class V8_EXPORT_PRIVATE Operand {
  public:
   // immediate
   V8_INLINE explicit Operand(int32_t immediate,
-                             RelocInfo::Mode rmode = RelocInfo::NONE);
+                             RelocInfo::Mode rmode = RelocInfo::NONE)
+      : rmode_(rmode) {
+    value_.immediate = immediate;
+  }
   V8_INLINE static Operand Zero();
   V8_INLINE explicit Operand(const ExternalReference& f);
   explicit Operand(Handle<HeapObject> handle);
@@ -156,8 +159,8 @@ class Operand {
   bool IsHeapObjectRequest() const {
     DCHECK_IMPLIES(is_heap_object_request_, IsImmediate());
     DCHECK_IMPLIES(is_heap_object_request_,
-        rmode_ == RelocInfo::EMBEDDED_OBJECT ||
-        rmode_ == RelocInfo::CODE_TARGET);
+                   rmode_ == RelocInfo::FULL_EMBEDDED_OBJECT ||
+                       rmode_ == RelocInfo::CODE_TARGET);
     return is_heap_object_request_;
   }
 
@@ -182,9 +185,8 @@ class Operand {
   friend class Assembler;
 };
 
-
 // Class MemOperand represents a memory operand in load and store instructions
-class MemOperand {
+class V8_EXPORT_PRIVATE MemOperand {
  public:
   // [rn +/- offset]      Offset/NegOffset
   // [rn +/- offset]!     PreIndex/NegPreIndex
@@ -240,10 +242,9 @@ class MemOperand {
   friend class Assembler;
 };
 
-
 // Class NeonMemOperand represents a memory operand in load and
 // store NEON instructions
-class NeonMemOperand {
+class V8_EXPORT_PRIVATE NeonMemOperand {
  public:
   // [rn {:align}]       Offset
   // [rn {:align}]!      PostIndex
@@ -263,7 +264,6 @@ class NeonMemOperand {
   Register rm_;  // register increment
   int align_;
 };
-
 
 // Class NeonListOperand represents a list of NEON registers
 class NeonListOperand {
@@ -357,14 +357,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   V8_INLINE static void set_target_address_at(
       Address pc, Address constant_pool, Address target,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
-
-  // Return the code target address at a call site from the return address
-  // of that call in the instruction stream.
-  V8_INLINE static Address target_address_from_return_address(Address pc);
-
-  // Given the address of the beginning of a call, return the address
-  // in the instruction stream that the call will return from.
-  V8_INLINE static Address return_address_from_call_start(Address pc);
 
   // This sets the branch destination (which is in the constant pool on ARM).
   // This is for calls and branches within generated code.
@@ -1399,7 +1391,7 @@ class PatchingAssembler : public Assembler {
 // state, even if the list is modified by some other means. Note that this scope
 // can be nested but the destructors need to run in the opposite order as the
 // constructors. We do not have assertions for this.
-class UseScratchRegisterScope {
+class V8_EXPORT_PRIVATE UseScratchRegisterScope {
  public:
   explicit UseScratchRegisterScope(Assembler* assembler);
   ~UseScratchRegisterScope();

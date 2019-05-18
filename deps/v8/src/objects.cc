@@ -14,21 +14,21 @@
 
 #include "src/accessors.h"
 #include "src/allocation-site-scopes.h"
-#include "src/api-arguments-inl.h"
-#include "src/api-natives.h"
-#include "src/api.h"
+#include "src/api/api-arguments-inl.h"
+#include "src/api/api-natives.h"
+#include "src/api/api.h"
 #include "src/arguments.h"
 #include "src/ast/ast.h"
 #include "src/ast/scopes.h"
 #include "src/base/bits.h"
+#include "src/base/debug/stack_trace.h"
 #include "src/base/overflowing-math.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/bootstrapper.h"
 #include "src/builtins/builtins.h"
 #include "src/compiler.h"
 #include "src/counters-inl.h"
 #include "src/counters.h"
-#include "src/date.h"
+#include "src/date/date.h"
 #include "src/debug/debug.h"
 #include "src/elements.h"
 #include "src/execution.h"
@@ -39,8 +39,10 @@
 #include "src/function-kind.h"
 #include "src/globals.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/read-only-heap.h"
 #include "src/ic/ic.h"
 #include "src/identity-map.h"
+#include "src/init/bootstrapper.h"
 #include "src/isolate-inl.h"
 #include "src/keys.h"
 #include "src/log.h"
@@ -594,7 +596,7 @@ namespace {
 
 // TODO(bmeurer): Maybe we should introduce a marker interface Number,
 // where we put all these methods at some point?
-ComparisonResult NumberCompare(double x, double y) {
+ComparisonResult StrictNumberCompare(double x, double y) {
   if (std::isnan(x) || std::isnan(y)) {
     return ComparisonResult::kUndefined;
   } else if (x < y) {
@@ -606,19 +608,20 @@ ComparisonResult NumberCompare(double x, double y) {
   }
 }
 
-bool NumberEquals(double x, double y) {
+// See Number case of ES6#sec-strict-equality-comparison
+// Returns false if x or y is NaN, treats -0.0 as equal to 0.0.
+bool StrictNumberEquals(double x, double y) {
   // Must check explicitly for NaN's on Windows, but -0 works fine.
-  if (std::isnan(x)) return false;
-  if (std::isnan(y)) return false;
+  if (std::isnan(x) || std::isnan(y)) return false;
   return x == y;
 }
 
-bool NumberEquals(const Object x, const Object y) {
-  return NumberEquals(x->Number(), y->Number());
+bool StrictNumberEquals(const Object x, const Object y) {
+  return StrictNumberEquals(x->Number(), y->Number());
 }
 
-bool NumberEquals(Handle<Object> x, Handle<Object> y) {
-  return NumberEquals(*x, *y);
+bool StrictNumberEquals(Handle<Object> x, Handle<Object> y) {
+  return StrictNumberEquals(*x, *y);
 }
 
 ComparisonResult Reverse(ComparisonResult result) {
@@ -663,7 +666,7 @@ Maybe<ComparisonResult> Object::Compare(Isolate* isolate, Handle<Object> x,
   bool x_is_number = x->IsNumber();
   bool y_is_number = y->IsNumber();
   if (x_is_number && y_is_number) {
-    return Just(NumberCompare(x->Number(), y->Number()));
+    return Just(StrictNumberCompare(x->Number(), y->Number()));
   } else if (!x_is_number && !y_is_number) {
     return Just(BigInt::CompareToBigInt(Handle<BigInt>::cast(x),
                                         Handle<BigInt>::cast(y)));
@@ -683,11 +686,12 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
   while (true) {
     if (x->IsNumber()) {
       if (y->IsNumber()) {
-        return Just(NumberEquals(x, y));
+        return Just(StrictNumberEquals(x, y));
       } else if (y->IsBoolean()) {
-        return Just(NumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
+        return Just(
+            StrictNumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
       } else if (y->IsString()) {
-        return Just(NumberEquals(
+        return Just(StrictNumberEquals(
             x, String::ToNumber(isolate, Handle<String>::cast(y))));
       } else if (y->IsBigInt()) {
         return Just(BigInt::EqualToNumber(Handle<BigInt>::cast(y), x));
@@ -705,10 +709,11 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
                                    Handle<String>::cast(y)));
       } else if (y->IsNumber()) {
         x = String::ToNumber(isolate, Handle<String>::cast(x));
-        return Just(NumberEquals(x, y));
+        return Just(StrictNumberEquals(x, y));
       } else if (y->IsBoolean()) {
         x = String::ToNumber(isolate, Handle<String>::cast(x));
-        return Just(NumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
+        return Just(
+            StrictNumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
       } else if (y->IsBigInt()) {
         return Just(BigInt::EqualToString(isolate, Handle<BigInt>::cast(y),
                                           Handle<String>::cast(x)));
@@ -724,10 +729,12 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
       if (y->IsOddball()) {
         return Just(x.is_identical_to(y));
       } else if (y->IsNumber()) {
-        return Just(NumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
+        return Just(
+            StrictNumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
       } else if (y->IsString()) {
         y = String::ToNumber(isolate, Handle<String>::cast(y));
-        return Just(NumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
+        return Just(
+            StrictNumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
       } else if (y->IsBigInt()) {
         x = Oddball::ToNumber(isolate, Handle<Oddball>::cast(x));
         return Just(BigInt::EqualToNumber(Handle<BigInt>::cast(y), x));
@@ -776,7 +783,7 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
 bool Object::StrictEquals(Object that) {
   if (this->IsNumber()) {
     if (!that->IsNumber()) return false;
-    return NumberEquals(*this, that);
+    return StrictNumberEquals(*this, that);
   } else if (this->IsString()) {
     if (!that->IsString()) return false;
     return String::cast(*this)->Equals(String::cast(that));
@@ -947,7 +954,7 @@ MaybeHandle<FixedArray> CreateListFromArrayLikeFastPath(
           isolate, array, length);
     } else if (object->IsJSTypedArray()) {
       Handle<JSTypedArray> array = Handle<JSTypedArray>::cast(object);
-      size_t length = array->length_value();
+      size_t length = array->length();
       if (array->WasDetached() ||
           length > static_cast<size_t>(FixedArray::kMaxLength)) {
         return MaybeHandle<FixedArray>();
@@ -1231,7 +1238,7 @@ bool Object::ToInt32(int32_t* value) {
 // static constexpr object declarations need a definition to make the
 // compiler happy.
 constexpr Object Smi::kZero;
-constexpr Object SharedFunctionInfo::kNoSharedNameSentinel;
+V8_EXPORT_PRIVATE constexpr Object SharedFunctionInfo::kNoSharedNameSentinel;
 
 Handle<SharedFunctionInfo> FunctionTemplateInfo::GetOrCreateSharedFunctionInfo(
     Isolate* isolate, Handle<FunctionTemplateInfo> info,
@@ -1295,8 +1302,8 @@ bool FunctionTemplateInfo::IsTemplateFor(Map map) {
 FunctionTemplateRareData FunctionTemplateInfo::AllocateFunctionTemplateRareData(
     Isolate* isolate, Handle<FunctionTemplateInfo> function_template_info) {
   DCHECK(function_template_info->rare_data()->IsUndefined(isolate));
-  Handle<Struct> struct_obj =
-      isolate->factory()->NewStruct(FUNCTION_TEMPLATE_RARE_DATA_TYPE, TENURED);
+  Handle<Struct> struct_obj = isolate->factory()->NewStruct(
+      FUNCTION_TEMPLATE_RARE_DATA_TYPE, AllocationType::kOld);
   Handle<FunctionTemplateRareData> rare_data =
       i::Handle<FunctionTemplateRareData>::cast(struct_obj);
   function_template_info->set_rare_data(*rare_data);
@@ -1326,11 +1333,11 @@ Handle<TemplateList> TemplateList::Add(Isolate* isolate,
 
 // ES6 9.5.1
 // static
-MaybeHandle<Object> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
+MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   Isolate* isolate = proxy->GetIsolate();
   Handle<String> trap_name = isolate->factory()->getPrototypeOf_string();
 
-  STACK_CHECK(isolate, MaybeHandle<Object>());
+  STACK_CHECK(isolate, MaybeHandle<HeapObject>());
 
   // 1. Let handler be the value of the [[ProxyHandler]] internal slot.
   // 2. If handler is null, throw a TypeError exception.
@@ -1339,7 +1346,7 @@ MaybeHandle<Object> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   if (proxy->IsRevoked()) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kProxyRevoked, trap_name),
-                    Object);
+                    HeapObject);
   }
   Handle<JSReceiver> target(JSReceiver::cast(proxy->target()), isolate);
   Handle<JSReceiver> handler(JSReceiver::cast(proxy->handler()), isolate);
@@ -1347,7 +1354,7 @@ MaybeHandle<Object> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   // 5. Let trap be ? GetMethod(handler, "getPrototypeOf").
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
-                             Object::GetMethod(handler, trap_name), Object);
+                             Object::GetMethod(handler, trap_name), HeapObject);
   // 6. If trap is undefined, then return target.[[GetPrototypeOf]]().
   if (trap->IsUndefined(isolate)) {
     return JSReceiver::GetPrototype(isolate, target);
@@ -1357,31 +1364,33 @@ MaybeHandle<Object> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   Handle<Object> handler_proto;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, handler_proto,
-      Execution::Call(isolate, trap, handler, arraysize(argv), argv), Object);
+      Execution::Call(isolate, trap, handler, arraysize(argv), argv),
+      HeapObject);
   // 8. If Type(handlerProto) is neither Object nor Null, throw a TypeError.
   if (!(handler_proto->IsJSReceiver() || handler_proto->IsNull(isolate))) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kProxyGetPrototypeOfInvalid),
-                    Object);
+                    HeapObject);
   }
   // 9. Let extensibleTarget be ? IsExtensible(target).
   Maybe<bool> is_extensible = JSReceiver::IsExtensible(target);
-  MAYBE_RETURN_NULL(is_extensible);
+  MAYBE_RETURN(is_extensible, MaybeHandle<HeapObject>());
   // 10. If extensibleTarget is true, return handlerProto.
-  if (is_extensible.FromJust()) return handler_proto;
+  if (is_extensible.FromJust()) return Handle<HeapObject>::cast(handler_proto);
   // 11. Let targetProto be ? target.[[GetPrototypeOf]]().
-  Handle<Object> target_proto;
+  Handle<HeapObject> target_proto;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, target_proto,
-                             JSReceiver::GetPrototype(isolate, target), Object);
+                             JSReceiver::GetPrototype(isolate, target),
+                             HeapObject);
   // 12. If SameValue(handlerProto, targetProto) is false, throw a TypeError.
   if (!handler_proto->SameValue(*target_proto)) {
     THROW_NEW_ERROR(
         isolate,
         NewTypeError(MessageTemplate::kProxyGetPrototypeOfNonExtensible),
-        Object);
+        HeapObject);
   }
   // 13. Return handlerProto.
-  return handler_proto;
+  return Handle<HeapObject>::cast(handler_proto);
 }
 
 MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
@@ -1624,14 +1633,7 @@ bool Object::SameValue(Object other) {
   if (other == *this) return true;
 
   if (IsNumber() && other->IsNumber()) {
-    double this_value = Number();
-    double other_value = other->Number();
-    // SameValue(NaN, NaN) is true.
-    if (this_value != other_value) {
-      return std::isnan(this_value) && std::isnan(other_value);
-    }
-    // SameValue(0.0, -0.0) is false.
-    return (std::signbit(this_value) == std::signbit(other_value));
+    return SameNumberValue(Number(), other->Number());
   }
   if (IsString() && other->IsString()) {
     return String::cast(*this)->Equals(String::cast(other));
@@ -1803,22 +1805,6 @@ std::ostream& operator<<(std::ostream& os, const Object& obj) {
   return os;
 }
 
-void MaybeObject::ShortPrint(FILE* out) {
-  OFStream os(out);
-  os << Brief(*this);
-}
-
-void MaybeObject::ShortPrint(StringStream* accumulator) {
-  std::ostringstream os;
-  os << Brief(*this);
-  accumulator->Add(os.str().c_str());
-}
-
-void MaybeObject::ShortPrint(std::ostream& os) { os << Brief(*this); }
-
-Brief::Brief(const Object v) : value(v->ptr()) {}
-Brief::Brief(const MaybeObject v) : value(v.ptr()) {}
-
 std::ostream& operator<<(std::ostream& os, const Brief& v) {
   MaybeObject maybe_object(v.value);
   Smi smi;
@@ -1987,16 +1973,21 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {  // NOLINT
       }
       break;
     }
+    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
+      os << "<ClosureFeedbackCellArray["
+         << ClosureFeedbackCellArray::cast(*this)->length() << "]>";
+      break;
     case FEEDBACK_VECTOR_TYPE:
       os << "<FeedbackVector[" << FeedbackVector::cast(*this)->length() << "]>";
       break;
     case FREE_SPACE_TYPE:
       os << "<FreeSpace[" << FreeSpace::cast(*this)->size() << "]>";
       break;
-#define TYPED_ARRAY_SHORT_PRINT(Type, type, TYPE, ctype)                       \
-  case FIXED_##TYPE##_ARRAY_TYPE:                                              \
-    os << "<Fixed" #Type "Array[" << Fixed##Type##Array::cast(*this)->length() \
-       << "]>";                                                                \
+#define TYPED_ARRAY_SHORT_PRINT(Type, type, TYPE, ctype)                    \
+  case FIXED_##TYPE##_ARRAY_TYPE:                                           \
+    os << "<Fixed" #Type "Array["                                           \
+       << Fixed##Type##Array::cast(*this)->number_of_elements_onheap_only() \
+       << "]>";                                                             \
     break;
 
       TYPED_ARRAYS(TYPED_ARRAY_SHORT_PRINT)
@@ -2364,7 +2355,6 @@ void HeapObject::RehashBasedOnMap(ReadOnlyRoots roots) {
   switch (map()->instance_type()) {
     case HASH_TABLE_TYPE:
       UNREACHABLE();
-      break;
     case NAME_DICTIONARY_TYPE:
       NameDictionary::cast(*this)->Rehash(roots);
       break;
@@ -2396,8 +2386,14 @@ void HeapObject::RehashBasedOnMap(ReadOnlyRoots roots) {
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
       DCHECK_EQ(0, SmallOrderedNameDictionary::cast(*this)->NumberOfElements());
       break;
-    default:
+    case ONE_BYTE_INTERNALIZED_STRING_TYPE:
+    case INTERNALIZED_STRING_TYPE:
+      // Rare case, rehash read-only space strings before they are sealed.
+      DCHECK(ReadOnlyHeap::Contains(*this));
+      String::cast(*this)->Hash();
       break;
+    default:
+      UNREACHABLE();
   }
 }
 
@@ -2559,7 +2555,7 @@ Maybe<bool> Object::SetProperty(LookupIterator* it, Handle<Object> value,
       (GetShouldThrow(it->isolate(), should_throw) ==
        ShouldThrow::kThrowOnError)) {
     it->isolate()->Throw(*it->isolate()->factory()->NewReferenceError(
-        MessageTemplate::kNotDefined, it->name()));
+        MessageTemplate::kNotDefined, it->GetName()));
     return Nothing<bool>();
   }
 
@@ -3778,6 +3774,17 @@ Handle<DescriptorArray> DescriptorArray::CopyForFastObjectClone(
     MaybeObject type = src->GetValue(i);
     if (details.location() == PropertyLocation::kField) {
       type = MaybeObject::FromObject(FieldType::Any());
+      // TODO(bmeurer,ishell): Igor suggested to use some kind of dynamic
+      // checks in the fast-path for CloneObjectIC instead to avoid the
+      // need to generalize the descriptors here. That will also enable
+      // us to skip the defensive copying of the target map whenever a
+      // CloneObjectIC misses.
+      if (FLAG_modify_field_representation_inplace &&
+          (new_details.representation().IsSmi() ||
+           new_details.representation().IsHeapObject())) {
+        new_details =
+            new_details.CopyWithRepresentation(Representation::Tagged());
+      }
     }
     descriptors->Set(i, key, type, new_details);
   }
@@ -3806,7 +3813,7 @@ bool DescriptorArray::IsEqualUpTo(DescriptorArray desc, int nof_descriptors) {
 Handle<FixedArray> FixedArray::SetAndGrow(Isolate* isolate,
                                           Handle<FixedArray> array, int index,
                                           Handle<Object> value,
-                                          PretenureFlag pretenure) {
+                                          AllocationType allocation) {
   if (index < array->length()) {
     array->set(index, *value);
     return array;
@@ -3816,7 +3823,7 @@ Handle<FixedArray> FixedArray::SetAndGrow(Isolate* isolate,
     capacity = JSObject::NewElementsCapacity(capacity);
   } while (capacity <= index);
   Handle<FixedArray> new_array =
-      isolate->factory()->NewUninitializedFixedArray(capacity, pretenure);
+      isolate->factory()->NewUninitializedFixedArray(capacity, allocation);
   array->CopyTo(0, *new_array, 0, array->length());
   new_array->FillWithHoles(array->length(), new_array->length());
   new_array->set(index, *value);
@@ -3962,14 +3969,14 @@ bool WeakArrayList::IsFull() { return length() == capacity(); }
 Handle<WeakArrayList> WeakArrayList::EnsureSpace(Isolate* isolate,
                                                  Handle<WeakArrayList> array,
                                                  int length,
-                                                 PretenureFlag pretenure) {
+                                                 AllocationType allocation) {
   int capacity = array->capacity();
   if (capacity < length) {
     int new_capacity = length;
     new_capacity = new_capacity + Max(new_capacity / 2, 2);
     int grow_by = new_capacity - capacity;
-    array =
-        isolate->factory()->CopyWeakArrayListAndGrow(array, grow_by, pretenure);
+    array = isolate->factory()->CopyWeakArrayListAndGrow(array, grow_by,
+                                                         allocation);
   }
   return array;
 }
@@ -4053,7 +4060,7 @@ Handle<WeakArrayList> PrototypeUsers::Add(Isolate* isolate,
 
 WeakArrayList PrototypeUsers::Compact(Handle<WeakArrayList> array, Heap* heap,
                                       CompactionCallback callback,
-                                      PretenureFlag pretenure) {
+                                      AllocationType allocation) {
   if (array->length() == 0) {
     return *array;
   }
@@ -4065,7 +4072,7 @@ WeakArrayList PrototypeUsers::Compact(Handle<WeakArrayList> array, Heap* heap,
   Handle<WeakArrayList> new_array = WeakArrayList::EnsureSpace(
       heap->isolate(),
       handle(ReadOnlyRoots(heap).empty_weak_array_list(), heap->isolate()),
-      new_length, pretenure);
+      new_length, allocation);
   // Allocation might have caused GC and turned some of the elements into
   // cleared weak heap objects. Count the number of live objects again.
   int copy_to = kFirstIndex;
@@ -4122,11 +4129,15 @@ Handle<FrameArray> FrameArray::AppendWasmFrame(
   const int new_length = LengthFor(frame_count + 1);
   Handle<FrameArray> array = EnsureSpace(isolate, in, new_length);
   // The {code} will be {nullptr} for interpreted wasm frames.
-  Handle<Foreign> code_foreign =
-      isolate->factory()->NewForeign(reinterpret_cast<Address>(code));
+  Handle<Object> code_ref = isolate->factory()->undefined_value();
+  if (code) {
+    auto native_module = wasm_instance->module_object()->shared_native_module();
+    code_ref = Managed<wasm::GlobalWasmCodeRef>::Allocate(
+        isolate, 0, code, std::move(native_module));
+  }
   array->SetWasmInstance(frame_count, *wasm_instance);
   array->SetWasmFunctionIndex(frame_count, Smi::FromInt(wasm_function_index));
-  array->SetWasmCodeObject(frame_count, *code_foreign);
+  array->SetWasmCodeObject(frame_count, *code_ref);
   array->SetOffset(frame_count, Smi::FromInt(offset));
   array->SetFlags(frame_count, Smi::FromInt(flags));
   array->set(kFrameCountIndex, Smi::FromInt(frame_count + 1));
@@ -4148,11 +4159,11 @@ Handle<FrameArray> FrameArray::EnsureSpace(Isolate* isolate,
 Handle<DescriptorArray> DescriptorArray::Allocate(Isolate* isolate,
                                                   int nof_descriptors,
                                                   int slack,
-                                                  AllocationType type) {
+                                                  AllocationType allocation) {
   return nof_descriptors + slack == 0
              ? isolate->factory()->empty_descriptor_array()
              : isolate->factory()->NewDescriptorArray(nof_descriptors, slack,
-                                                      type);
+                                                      allocation);
 }
 
 void DescriptorArray::Initialize(EnumCache enum_cache,
@@ -4520,87 +4531,6 @@ uint32_t StringHasher::MakeArrayIndexHash(uint32_t value, int length) {
 }
 
 
-uint32_t StringHasher::GetHashField() {
-  if (length_ <= String::kMaxHashCalcLength) {
-    if (is_array_index_) {
-      return MakeArrayIndexHash(array_index_, length_);
-    }
-    return (GetHashCore(raw_running_hash_) << String::kHashShift) |
-           String::kIsNotArrayIndexMask;
-  } else {
-    return (length_ << String::kHashShift) | String::kIsNotArrayIndexMask;
-  }
-}
-
-uint32_t StringHasher::ComputeUtf8Hash(Vector<const char> chars, uint64_t seed,
-                                       int* utf16_length_out) {
-  int vector_length = chars.length();
-  // Handle some edge cases
-  if (vector_length <= 1) {
-    DCHECK(vector_length == 0 ||
-           static_cast<uint8_t>(chars.start()[0]) <=
-               unibrow::Utf8::kMaxOneByteChar);
-    *utf16_length_out = vector_length;
-    return HashSequentialString(chars.start(), vector_length, seed);
-  }
-
-  // Start with a fake length which won't affect computation.
-  // It will be updated later.
-  StringHasher hasher(String::kMaxArrayIndexSize, seed);
-  DCHECK(hasher.is_array_index_);
-
-  unibrow::Utf8Iterator it = unibrow::Utf8Iterator(chars);
-  int utf16_length = 0;
-  bool is_index = true;
-
-  while (utf16_length < String::kMaxHashCalcLength && !it.Done()) {
-    utf16_length++;
-    uint16_t c = *it;
-    ++it;
-    hasher.AddCharacter(c);
-    if (is_index) is_index = hasher.UpdateIndex(c);
-  }
-
-  // Now that hashing is done, we just need to calculate utf16_length
-  while (!it.Done()) {
-    ++it;
-    utf16_length++;
-  }
-
-  *utf16_length_out = utf16_length;
-  // Must set length here so that hash computation is correct.
-  hasher.length_ = utf16_length;
-  return hasher.GetHashField();
-}
-
-void IteratingStringHasher::VisitConsString(ConsString cons_string) {
-  // Run small ConsStrings through ConsStringIterator.
-  if (cons_string->length() < 64) {
-    ConsStringIterator iter(cons_string);
-    int offset;
-    for (String string = iter.Next(&offset); !string.is_null();
-         string = iter.Next(&offset)) {
-      DCHECK_EQ(0, offset);
-      String::VisitFlat(this, string, 0);
-    }
-    return;
-  }
-  // Slow case.
-  const int max_length = String::kMaxHashCalcLength;
-  int length = std::min(cons_string->length(), max_length);
-  if (cons_string->IsOneByteRepresentation()) {
-    uint8_t* buffer = new uint8_t[length];
-    String::WriteToFlat(cons_string, buffer, 0, length);
-    AddCharacters(buffer, length);
-    delete[] buffer;
-  } else {
-    uint16_t* buffer = new uint16_t[length];
-    String::WriteToFlat(cons_string, buffer, 0, length);
-    AddCharacters(buffer, length);
-    delete[] buffer;
-  }
-}
-
 Handle<Object> CacheInitialJSArrayMaps(Handle<Context> native_context,
                                        Handle<Map> initial_map) {
   // Replace all of the cached initial array maps in the native context with
@@ -4628,7 +4558,8 @@ Handle<Object> CacheInitialJSArrayMaps(Handle<Context> native_context,
   return initial_map;
 }
 
-STATIC_ASSERT(Oddball::kToNumberRawOffset == HeapNumber::kValueOffset);
+STATIC_ASSERT_FIELD_OFFSETS_EQUAL(HeapNumber::kValueOffset,
+                                  Oddball::kToNumberRawOffset);
 
 void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
                          const char* to_string, Handle<Object> to_number,
@@ -4649,22 +4580,24 @@ void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
   oddball->set_kind(kind);
 }
 
-int Script::GetEvalPosition() {
-  DisallowHeapAllocation no_gc;
-  DCHECK(compilation_type() == Script::COMPILATION_TYPE_EVAL);
-  int position = eval_from_position();
+// static
+int Script::GetEvalPosition(Isolate* isolate, Handle<Script> script) {
+  DCHECK(script->compilation_type() == Script::COMPILATION_TYPE_EVAL);
+  int position = script->eval_from_position();
   if (position < 0) {
     // Due to laziness, the position may not have been translated from code
     // offset yet, which would be encoded as negative integer. In that case,
     // translate and set the position.
-    if (!has_eval_from_shared()) {
+    if (!script->has_eval_from_shared()) {
       position = 0;
     } else {
-      SharedFunctionInfo shared = eval_from_shared();
+      Handle<SharedFunctionInfo> shared =
+          handle(script->eval_from_shared(), isolate);
+      SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared);
       position = shared->abstract_code()->SourcePosition(-position);
     }
     DCHECK_GE(position, 0);
-    set_eval_from_position(position);
+    script->set_eval_from_position(position);
   }
   return position;
 }
@@ -4865,6 +4798,37 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
   return handle(SharedFunctionInfo::cast(heap_object), isolate);
 }
 
+std::unique_ptr<v8::tracing::TracedValue> Script::ToTracedValue() {
+  auto value = v8::tracing::TracedValue::Create();
+  if (name()->IsString()) {
+    value->SetString("name", String::cast(name())->ToCString());
+  }
+  value->SetInteger("lineOffset", line_offset());
+  value->SetInteger("columnOffset", column_offset());
+  if (source_mapping_url()->IsString()) {
+    value->SetString("sourceMappingURL",
+                     String::cast(source_mapping_url())->ToCString());
+  }
+  if (source()->IsString()) {
+    value->SetString("source", String::cast(source())->ToCString());
+  }
+  return value;
+}
+
+// static
+const char* Script::kTraceScope = "v8::internal::Script";
+
+uint64_t Script::TraceID() const { return id(); }
+
+std::unique_ptr<v8::tracing::TracedValue> Script::TraceIDRef() const {
+  auto value = v8::tracing::TracedValue::Create();
+  std::ostringstream ost;
+  ost << "0x" << std::hex << TraceID();
+  value->SetString("id_ref", ost.str());
+  value->SetString("scope", kTraceScope);
+  return value;
+}
+
 Script::Iterator::Iterator(Isolate* isolate)
     : iterator_(isolate->heap()->script_list()) {}
 
@@ -4883,6 +4847,71 @@ uint32_t SharedFunctionInfo::Hash() {
   int start_pos = StartPosition();
   int script_id = script()->IsScript() ? Script::cast(script())->id() : 0;
   return static_cast<uint32_t>(base::hash_combine(start_pos, script_id));
+}
+
+std::unique_ptr<v8::tracing::TracedValue> SharedFunctionInfo::ToTracedValue(
+    FunctionLiteral* literal) {
+  auto value = v8::tracing::TracedValue::Create();
+  if (HasSharedName()) {
+    value->SetString("name", Name()->ToCString());
+  }
+  if (HasInferredName()) {
+    value->SetString("inferredName", inferred_name()->ToCString());
+  }
+  if (is_toplevel()) {
+    value->SetBoolean("isToplevel", true);
+  }
+  value->SetInteger("formalParameterCount", internal_formal_parameter_count());
+  value->SetString("languageMode", LanguageMode2String(language_mode()));
+  value->SetString("kind", FunctionKind2String(kind()));
+  if (script()->IsScript()) {
+    value->SetValue("script", Script::cast(script())->TraceIDRef());
+    value->BeginDictionary("sourcePosition");
+    Script::PositionInfo info;
+    // We get the start position from the {literal} here, because the
+    // SharedFunctionInfo itself might not have a way to get to the
+    // start position early on (currently that's the case when it's
+    // marked for eager compilation).
+    if (Script::cast(script())->GetPositionInfo(literal->start_position(),
+                                                &info, Script::WITH_OFFSET)) {
+      value->SetInteger("line", info.line + 1);
+      value->SetInteger("column", info.column + 1);
+    }
+    value->EndDictionary();
+  }
+  return value;
+}
+
+// static
+const char* SharedFunctionInfo::kTraceScope =
+    "v8::internal::SharedFunctionInfo";
+
+uint64_t SharedFunctionInfo::TraceID() const {
+  // TODO(bmeurer): We use a combination of Script ID and function literal
+  // ID (within the Script) to uniquely identify SharedFunctionInfos. This
+  // can add significant overhead, and we should probably find a better way
+  // to uniquely identify SharedFunctionInfos over time.
+  Script script = Script::cast(this->script());
+  WeakFixedArray script_functions = script->shared_function_infos();
+  for (int i = 0; i < script_functions->length(); ++i) {
+    HeapObject script_function;
+    if (script_functions->Get(i).GetHeapObjectIfWeak(&script_function) &&
+        script_function->address() == address()) {
+      return (static_cast<uint64_t>(script->id() + 1) << 32) |
+             (static_cast<uint64_t>(i));
+    }
+  }
+  UNREACHABLE();
+}
+
+std::unique_ptr<v8::tracing::TracedValue> SharedFunctionInfo::TraceIDRef()
+    const {
+  auto value = v8::tracing::TracedValue::Create();
+  std::ostringstream ost;
+  ost << "0x" << std::hex << TraceID();
+  value->SetString("id_ref", ost.str());
+  value->SetString("scope", kTraceScope);
+  return value;
 }
 
 Code SharedFunctionInfo::GetCode() const {
@@ -4922,6 +4951,8 @@ Code SharedFunctionInfo::GetCode() const {
     DCHECK(code->IsCode());
     DCHECK(code->is_interpreter_trampoline_builtin());
     return code;
+  } else if (data->IsWasmCapiFunctionData()) {
+    return wasm_capi_function_data()->wrapper_code();
   }
   UNREACHABLE();
 }
@@ -4930,6 +4961,11 @@ WasmExportedFunctionData SharedFunctionInfo::wasm_exported_function_data()
     const {
   DCHECK(HasWasmExportedFunctionData());
   return WasmExportedFunctionData::cast(function_data());
+}
+
+WasmCapiFunctionData SharedFunctionInfo::wasm_capi_function_data() const {
+  DCHECK(HasWasmCapiFunctionData());
+  return WasmCapiFunctionData::cast(function_data());
 }
 
 SharedFunctionInfo::ScriptIterator::ScriptIterator(Isolate* isolate,
@@ -5218,7 +5254,7 @@ bool SharedFunctionInfo::IsInlineable() {
   if (GetIsolate()->is_precise_binary_code_coverage() &&
       !has_reported_binary_coverage()) {
     // We may miss invocations if this function is inlined.
-    TraceInlining(*this, "false (requires precise binary coverage)");
+    TraceInlining(*this, "false (requires reported binary coverage)");
     return false;
   }
 
@@ -5228,7 +5264,7 @@ bool SharedFunctionInfo::IsInlineable() {
   }
 
   // Built-in functions are handled by the JSCallReducer.
-  if (HasBuiltinFunctionId()) {
+  if (HasBuiltinId()) {
     TraceInlining(*this, "false (is a builtin)");
     return false;
   }
@@ -5374,14 +5410,15 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
     }
   }
 
+  shared_info->set_length(lit->function_length());
+
   // For lazy parsed functions, the following flags will be inaccurate since we
   // don't have the information yet. They're set later in
   // SetSharedFunctionFlagsFromLiteral (compiler.cc), when the function is
   // really parsed and compiled.
   if (lit->ShouldEagerCompile()) {
-    shared_info->set_length(lit->function_length());
     shared_info->set_has_duplicate_parameters(lit->has_duplicate_parameters());
-    shared_info->SetExpectedNofPropertiesFromEstimate(lit);
+    shared_info->UpdateAndFinalizeExpectedNofPropertiesFromEstimate(lit);
     shared_info->set_is_safe_to_skip_arguments_adaptor(
         lit->SafeToSkipArgumentsAdaptor());
     DCHECK_NULL(lit->produced_preparse_data());
@@ -5391,10 +5428,6 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
     // than relying on a property of the literal.
     needs_position_info = false;
   } else {
-    // Set an invalid length for lazy functions. This way we can set the correct
-    // value after compiling, but avoid overwriting values set manually by the
-    // bootstrapper.
-    shared_info->set_length(SharedFunctionInfo::kInvalidLength);
     shared_info->set_is_safe_to_skip_arguments_adaptor(false);
     ProducedPreparseData* scope_data = lit->produced_preparse_data();
     if (scope_data != nullptr) {
@@ -5407,6 +5440,7 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
       shared_info->set_uncompiled_data(*data);
       needs_position_info = false;
     }
+    shared_info->UpdateExpectedNofPropertiesFromEstimate(lit);
   }
   if (needs_position_info) {
     Handle<UncompiledData> data =
@@ -5417,9 +5451,29 @@ void SharedFunctionInfo::InitFromFunctionLiteral(
   }
 }
 
-void SharedFunctionInfo::SetExpectedNofPropertiesFromEstimate(
+uint16_t SharedFunctionInfo::get_property_estimate_from_literal(
     FunctionLiteral* literal) {
   int estimate = literal->expected_property_count();
+
+  // If this is a class constructor, we may have already parsed fields.
+  if (is_class_constructor()) {
+    estimate += expected_nof_properties();
+  }
+  return estimate;
+}
+
+void SharedFunctionInfo::UpdateExpectedNofPropertiesFromEstimate(
+    FunctionLiteral* literal) {
+  set_expected_nof_properties(get_property_estimate_from_literal(literal));
+}
+
+void SharedFunctionInfo::UpdateAndFinalizeExpectedNofPropertiesFromEstimate(
+    FunctionLiteral* literal) {
+  DCHECK(literal->ShouldEagerCompile());
+  if (are_properties_final()) {
+    return;
+  }
+  int estimate = get_property_estimate_from_literal(literal);
 
   // If no properties are added in the constructor, they are more likely
   // to be added later.
@@ -5431,6 +5485,7 @@ void SharedFunctionInfo::SetExpectedNofPropertiesFromEstimate(
   estimate = std::min(estimate, kMaxUInt8);
 
   set_expected_nof_properties(estimate);
+  set_are_properties_final(true);
 }
 
 void SharedFunctionInfo::SetFunctionTokenPosition(int function_token_position,
@@ -5515,6 +5570,13 @@ void SharedFunctionInfo::SetPosition(int start_position, int end_position) {
   } else {
     UNREACHABLE();
   }
+}
+
+bool SharedFunctionInfo::AreSourcePositionsAvailable() const {
+  if (FLAG_enable_lazy_source_positions) {
+    return !HasBytecodeArray() || GetBytecodeArray()->HasSourcePositionTable();
+  }
+  return true;
 }
 
 // static
@@ -5646,10 +5708,10 @@ void AllocationSite::ResetPretenureDecision() {
   set_memento_create_count(0);
 }
 
-PretenureFlag AllocationSite::GetPretenureMode() const {
+AllocationType AllocationSite::GetAllocationType() const {
   PretenureDecision mode = pretenure_decision();
   // Zombie objects "decide" to be untenured.
-  return mode == kTenure ? TENURED : NOT_TENURED;
+  return mode == kTenure ? AllocationType::kOld : AllocationType::kYoung;
 }
 
 bool AllocationSite::IsNested() {
@@ -6038,17 +6100,33 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
 
     Handle<NativeContext> handler_context;
 
-    STATIC_ASSERT(static_cast<int>(PromiseReaction::kSize) ==
-                  static_cast<int>(PromiseReactionJobTask::kSize));
+    Handle<HeapObject> primary_handler;
+    Handle<HeapObject> secondary_handler;
     if (type == PromiseReaction::kFulfill) {
-      Handle<HeapObject> handler = handle(reaction->fulfill_handler(), isolate);
-      if (handler->IsJSReceiver()) {
-        JSReceiver::GetContextForMicrotask(Handle<JSReceiver>::cast(handler))
-            .ToHandle(&handler_context);
-      }
-      if (handler_context.is_null())
-        handler_context = isolate->native_context();
+      primary_handler = handle(reaction->fulfill_handler(), isolate);
+      secondary_handler = handle(reaction->reject_handler(), isolate);
+    } else {
+      primary_handler = handle(reaction->reject_handler(), isolate);
+      secondary_handler = handle(reaction->fulfill_handler(), isolate);
+    }
 
+    if (primary_handler->IsJSReceiver()) {
+      JSReceiver::GetContextForMicrotask(
+          Handle<JSReceiver>::cast(primary_handler))
+          .ToHandle(&handler_context);
+    }
+    if (handler_context.is_null() && secondary_handler->IsJSReceiver()) {
+      JSReceiver::GetContextForMicrotask(
+          Handle<JSReceiver>::cast(secondary_handler))
+          .ToHandle(&handler_context);
+    }
+    if (handler_context.is_null()) handler_context = isolate->native_context();
+
+    STATIC_ASSERT(
+        static_cast<int>(PromiseReaction::kSize) ==
+        static_cast<int>(
+            PromiseReactionJobTask::kSizeOfAllPromiseReactionJobTasks));
+    if (type == PromiseReaction::kFulfill) {
       task->synchronized_set_map(
           ReadOnlyRoots(isolate).promise_fulfill_reaction_job_task_map());
       Handle<PromiseFulfillReactionJobTask>::cast(task)->set_argument(
@@ -6064,19 +6142,13 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
               PromiseFulfillReactionJobTask::kPromiseOrCapabilityOffset));
     } else {
       DisallowHeapAllocation no_gc;
-      Handle<HeapObject> handler = handle(reaction->reject_handler(), isolate);
-      if (handler->IsJSReceiver()) {
-        JSReceiver::GetContextForMicrotask(Handle<JSReceiver>::cast(handler))
-            .ToHandle(&handler_context);
-      }
-      if (handler_context.is_null())
-        handler_context = isolate->native_context();
       task->synchronized_set_map(
           ReadOnlyRoots(isolate).promise_reject_reaction_job_task_map());
       Handle<PromiseRejectReactionJobTask>::cast(task)->set_argument(*argument);
       Handle<PromiseRejectReactionJobTask>::cast(task)->set_context(
           *handler_context);
-      Handle<PromiseRejectReactionJobTask>::cast(task)->set_handler(*handler);
+      Handle<PromiseRejectReactionJobTask>::cast(task)->set_handler(
+          *primary_handler);
       STATIC_ASSERT(
           static_cast<int>(PromiseReaction::kPromiseOrCapabilityOffset) ==
           static_cast<int>(
@@ -6145,7 +6217,7 @@ JSRegExp::Flags RegExpFlagsFromString(Isolate* isolate, Handle<String> flags,
     DisallowHeapAllocation no_gc;
     SeqOneByteString seq_flags = SeqOneByteString::cast(*flags);
     for (int i = 0; i < length; i++) {
-      JSRegExp::Flag flag = CharToFlag(seq_flags.SeqOneByteStringGet(i));
+      JSRegExp::Flag flag = CharToFlag(seq_flags.Get(i));
       // Duplicate or invalid flag.
       if (value & flag) return JSRegExp::Flags(0);
       value |= flag;
@@ -6371,30 +6443,11 @@ class RegExpKey : public HashTableKey {
   Smi flags_;
 };
 
-Handle<String> OneByteStringKey::AsHandle(Isolate* isolate) {
-  return isolate->factory()->NewOneByteInternalizedString(string_, HashField());
-}
-
-Handle<String> TwoByteStringKey::AsHandle(Isolate* isolate) {
-  return isolate->factory()->NewTwoByteInternalizedString(string_, HashField());
-}
-
-Handle<String> SeqOneByteSubStringKey::AsHandle(Isolate* isolate) {
-  return isolate->factory()->NewOneByteInternalizedSubString(
-      string_, from_, length_, HashField());
-}
-
-bool SeqOneByteSubStringKey::IsMatch(Object string) {
-  DisallowHeapAllocation no_gc;
-  Vector<const uint8_t> chars(string_->GetChars(no_gc) + from_, length_);
-  return String::cast(string)->IsOneByteEqualTo(chars);
-}
-
 // InternalizedStringKey carries a string/internalized-string object as key.
-class InternalizedStringKey : public StringTableKey {
+class InternalizedStringKey final : public StringTableKey {
  public:
   explicit InternalizedStringKey(Handle<String> string)
-      : StringTableKey(0), string_(string) {
+      : StringTableKey(0, string->length()), string_(string) {
     DCHECK(!string->IsInternalizedString());
     DCHECK(string->IsFlat());
     // Make sure hash_field is computed.
@@ -6402,9 +6455,7 @@ class InternalizedStringKey : public StringTableKey {
     set_hash_field(string->hash_field());
   }
 
-  bool IsMatch(Object string) override {
-    return string_->SlowEquals(String::cast(string));
-  }
+  bool IsMatch(String string) override { return string_->SlowEquals(string); }
 
   Handle<String> AsHandle(Isolate* isolate) override {
     // Internalize the string if possible.
@@ -6449,7 +6500,7 @@ void HashTable<Derived, Shape>::IterateElements(ObjectVisitor* v) {
 
 template <typename Derived, typename Shape>
 Handle<Derived> HashTable<Derived, Shape>::New(
-    Isolate* isolate, int at_least_space_for, PretenureFlag pretenure,
+    Isolate* isolate, int at_least_space_for, AllocationType allocation,
     MinimumCapacity capacity_option) {
   DCHECK_LE(0, at_least_space_for);
   DCHECK_IMPLIES(capacity_option == USE_CUSTOM_MINIMUM_CAPACITY,
@@ -6461,17 +6512,17 @@ Handle<Derived> HashTable<Derived, Shape>::New(
   if (capacity > HashTable::kMaxCapacity) {
     isolate->heap()->FatalProcessOutOfMemory("invalid table size");
   }
-  return NewInternal(isolate, capacity, pretenure);
+  return NewInternal(isolate, capacity, allocation);
 }
 
 template <typename Derived, typename Shape>
 Handle<Derived> HashTable<Derived, Shape>::NewInternal(
-    Isolate* isolate, int capacity, PretenureFlag pretenure) {
+    Isolate* isolate, int capacity, AllocationType allocation) {
   Factory* factory = isolate->factory();
   int length = EntryToIndex(capacity);
   RootIndex map_root_index = Shape::GetMapRootIndex();
   Handle<FixedArray> array =
-      factory->NewFixedArrayWithMap(map_root_index, length, pretenure);
+      factory->NewFixedArrayWithMap(map_root_index, length, allocation);
   Handle<Derived> table = Handle<Derived>::cast(array);
 
   table->SetNumberOfElements(0);
@@ -6501,7 +6552,8 @@ void HashTable<Derived, Shape>::Rehash(ReadOnlyRoots roots, Derived new_table) {
     uint32_t hash = Shape::HashForObject(roots, k);
     uint32_t insertion_index =
         EntryToIndex(new_table->FindInsertionEntry(hash));
-    for (int j = 0; j < Shape::kEntrySize; j++) {
+    new_table->set_key(insertion_index, get(from_index), mode);
+    for (int j = 1; j < Shape::kEntrySize; j++) {
       new_table->set(insertion_index + j, get(from_index + j), mode);
     }
   }
@@ -6529,13 +6581,16 @@ void HashTable<Derived, Shape>::Swap(uint32_t entry1, uint32_t entry2,
   int index1 = EntryToIndex(entry1);
   int index2 = EntryToIndex(entry2);
   Object temp[Shape::kEntrySize];
+  Derived* self = static_cast<Derived*>(this);
   for (int j = 0; j < Shape::kEntrySize; j++) {
     temp[j] = get(index1 + j);
   }
-  for (int j = 0; j < Shape::kEntrySize; j++) {
+  self->set_key(index1, get(index2), mode);
+  for (int j = 1; j < Shape::kEntrySize; j++) {
     set(index1 + j, get(index2 + j), mode);
   }
-  for (int j = 0; j < Shape::kEntrySize; j++) {
+  self->set_key(index2, temp[0], mode);
+  for (int j = 1; j < Shape::kEntrySize; j++) {
     set(index2 + j, temp[j], mode);
   }
 }
@@ -6571,10 +6626,12 @@ void HashTable<Derived, Shape>::Rehash(ReadOnlyRoots roots) {
   }
   // Wipe deleted entries.
   Object the_hole = roots.the_hole_value();
-  Object undefined = roots.undefined_value();
+  HeapObject undefined = roots.undefined_value();
+  Derived* self = static_cast<Derived*>(this);
   for (uint32_t current = 0; current < capacity; current++) {
     if (KeyAt(current) == the_hole) {
-      set(EntryToIndex(current) + kEntryKeyIndex, undefined);
+      self->set_key(EntryToIndex(current) + kEntryKeyIndex, undefined,
+                    SKIP_WRITE_BARRIER);
     }
   }
   SetNumberOfDeletedElements(0);
@@ -6582,18 +6639,19 @@ void HashTable<Derived, Shape>::Rehash(ReadOnlyRoots roots) {
 
 template <typename Derived, typename Shape>
 Handle<Derived> HashTable<Derived, Shape>::EnsureCapacity(
-    Isolate* isolate, Handle<Derived> table, int n, PretenureFlag pretenure) {
+    Isolate* isolate, Handle<Derived> table, int n, AllocationType allocation) {
   if (table->HasSufficientCapacityToAdd(n)) return table;
 
   int capacity = table->Capacity();
   int new_nof = table->NumberOfElements() + n;
 
   const int kMinCapacityForPretenure = 256;
-  bool should_pretenure =
-      pretenure == TENURED || ((capacity > kMinCapacityForPretenure) &&
-                               !Heap::InYoungGeneration(*table));
+  bool should_pretenure = allocation == AllocationType::kOld ||
+                          ((capacity > kMinCapacityForPretenure) &&
+                           !Heap::InYoungGeneration(*table));
   Handle<Derived> new_table = HashTable::New(
-      isolate, new_nof, should_pretenure ? TENURED : NOT_TENURED);
+      isolate, new_nof,
+      should_pretenure ? AllocationType::kOld : AllocationType::kYoung);
 
   table->Rehash(ReadOnlyRoots(isolate), *new_table);
   return new_table;
@@ -6641,7 +6699,8 @@ Handle<Derived> HashTable<Derived, Shape>::Shrink(Isolate* isolate,
   bool pretenure = (at_least_room_for > kMinCapacityForPretenure) &&
                    !Heap::InYoungGeneration(*table);
   Handle<Derived> new_table =
-      HashTable::New(isolate, new_capacity, pretenure ? TENURED : NOT_TENURED,
+      HashTable::New(isolate, new_capacity,
+                     pretenure ? AllocationType::kOld : AllocationType::kYoung,
                      USE_CUSTOM_MINIMUM_CAPACITY);
 
   table->Rehash(ReadOnlyRoots(isolate), *new_table);
@@ -6662,78 +6721,6 @@ uint32_t HashTable<Derived, Shape>::FindInsertionEntry(uint32_t hash) {
   return entry;
 }
 
-
-// This class is used for looking up two character strings in the string table.
-// If we don't have a hit we don't want to waste much time so we unroll the
-// string hash calculation loop here for speed.  Doesn't work if the two
-// characters form a decimal integer, since such strings have a different hash
-// algorithm.
-class TwoCharHashTableKey : public StringTableKey {
- public:
-  TwoCharHashTableKey(uint16_t c1, uint16_t c2, uint64_t seed)
-      : StringTableKey(ComputeHashField(c1, c2, seed)), c1_(c1), c2_(c2) {}
-
-  bool IsMatch(Object o) override {
-    String other = String::cast(o);
-    if (other->length() != 2) return false;
-    if (other->Get(0) != c1_) return false;
-    return other->Get(1) == c2_;
-  }
-
-  Handle<String> AsHandle(Isolate* isolate) override {
-    // The TwoCharHashTableKey is only used for looking in the string
-    // table, not for adding to it.
-    UNREACHABLE();
-  }
-
- private:
-  uint32_t ComputeHashField(uint16_t c1, uint16_t c2, uint64_t seed) {
-    // Char 1.
-    uint32_t hash = static_cast<uint32_t>(seed);
-    hash += c1;
-    hash += hash << 10;
-    hash ^= hash >> 6;
-    // Char 2.
-    hash += c2;
-    hash += hash << 10;
-    hash ^= hash >> 6;
-    // GetHash.
-    hash += hash << 3;
-    hash ^= hash >> 11;
-    hash += hash << 15;
-    if ((hash & String::kHashBitMask) == 0) hash = StringHasher::kZeroHash;
-    hash = (hash << String::kHashShift) | String::kIsNotArrayIndexMask;
-#ifdef DEBUG
-    // If this assert fails then we failed to reproduce the two-character
-    // version of the string hashing algorithm above.  One reason could be
-    // that we were passed two digits as characters, since the hash
-    // algorithm is different in that case.
-    uint16_t chars[2] = {c1, c2};
-    uint32_t check_hash = StringHasher::HashSequentialString(chars, 2, seed);
-    DCHECK_EQ(hash, check_hash);
-#endif
-    return hash;
-  }
-
-  uint16_t c1_;
-  uint16_t c2_;
-};
-
-MaybeHandle<String> StringTable::LookupTwoCharsStringIfExists(
-    Isolate* isolate,
-    uint16_t c1,
-    uint16_t c2) {
-  TwoCharHashTableKey key(c1, c2, HashSeed(isolate));
-  Handle<StringTable> string_table = isolate->factory()->string_table();
-  int entry = string_table->FindEntry(isolate, &key);
-  if (entry == kNotFound) return MaybeHandle<String>();
-
-  Handle<String> result(String::cast(string_table->KeyAt(entry)), isolate);
-  DCHECK(StringShape(*result).IsInternalized());
-  DCHECK_EQ(result->Hash(), key.Hash());
-  return result;
-}
-
 void StringTable::EnsureCapacityForDeserialization(Isolate* isolate,
                                                    int expected) {
   Handle<StringTable> table = isolate->factory()->string_table();
@@ -6741,66 +6728,6 @@ void StringTable::EnsureCapacityForDeserialization(Isolate* isolate,
   table = StringTable::EnsureCapacity(isolate, table, expected);
   isolate->heap()->SetRootStringTable(*table);
 }
-
-namespace {
-
-template <class StringClass>
-void MigrateExternalStringResource(Isolate* isolate, String from, String to) {
-  StringClass cast_from = StringClass::cast(from);
-  StringClass cast_to = StringClass::cast(to);
-  const typename StringClass::Resource* to_resource = cast_to->resource();
-  if (to_resource == nullptr) {
-    // |to| is a just-created internalized copy of |from|. Migrate the resource.
-    cast_to->SetResource(isolate, cast_from->resource());
-    // Zap |from|'s resource pointer to reflect the fact that |from| has
-    // relinquished ownership of its resource.
-    isolate->heap()->UpdateExternalString(
-        from, ExternalString::cast(from)->ExternalPayloadSize(), 0);
-    cast_from->SetResource(isolate, nullptr);
-  } else if (to_resource != cast_from->resource()) {
-    // |to| already existed and has its own resource. Finalize |from|.
-    isolate->heap()->FinalizeExternalString(from);
-  }
-}
-
-void MakeStringThin(String string, String internalized, Isolate* isolate) {
-  DCHECK_NE(string, internalized);
-  DCHECK(internalized->IsInternalizedString());
-
-  if (string->IsExternalString()) {
-    if (internalized->IsExternalOneByteString()) {
-      MigrateExternalStringResource<ExternalOneByteString>(isolate, string,
-                                                           internalized);
-    } else if (internalized->IsExternalTwoByteString()) {
-      MigrateExternalStringResource<ExternalTwoByteString>(isolate, string,
-                                                           internalized);
-    } else {
-      // If the external string is duped into an existing non-external
-      // internalized string, free its resource (it's about to be rewritten
-      // into a ThinString below).
-      isolate->heap()->FinalizeExternalString(string);
-    }
-  }
-
-  DisallowHeapAllocation no_gc;
-  int old_size = string->Size();
-  isolate->heap()->NotifyObjectLayoutChange(string, old_size, no_gc);
-  bool one_byte = internalized->IsOneByteRepresentation();
-  Handle<Map> map = one_byte ? isolate->factory()->thin_one_byte_string_map()
-                             : isolate->factory()->thin_string_map();
-  DCHECK_GE(old_size, ThinString::kSize);
-  string->synchronized_set_map(*map);
-  ThinString thin = ThinString::cast(string);
-  thin->set_actual(internalized);
-  Address thin_end = thin->address() + ThinString::kSize;
-  int size_delta = old_size - ThinString::kSize;
-  if (size_delta != 0) {
-    Heap* heap = isolate->heap();
-    heap->CreateFillerObjectAt(thin_end, size_delta, ClearRecordedSlots::kNo);
-  }
-}
-
-}  // namespace
 
 // static
 Handle<String> StringTable::LookupString(Isolate* isolate,
@@ -6813,7 +6740,7 @@ Handle<String> StringTable::LookupString(Isolate* isolate,
 
   if (FLAG_thin_strings) {
     if (!string->IsInternalizedString()) {
-      MakeStringThin(*string, *result, isolate);
+      string->MakeThin(isolate, *result);
     }
   } else {  // !FLAG_thin_strings
     if (string->IsConsString()) {
@@ -6838,6 +6765,7 @@ Handle<String> StringTable::LookupString(Isolate* isolate,
 }
 
 // static
+template <typename StringTableKey>
 Handle<String> StringTable::LookupKey(Isolate* isolate, StringTableKey* key) {
   Handle<StringTable> table = isolate->factory()->string_table();
   int entry = table->FindEntry(isolate, key);
@@ -6855,6 +6783,13 @@ Handle<String> StringTable::LookupKey(Isolate* isolate, StringTableKey* key) {
   return AddKeyNoResize(isolate, key);
 }
 
+template Handle<String> StringTable::LookupKey(Isolate* isolate,
+                                               OneByteStringKey* key);
+template Handle<String> StringTable::LookupKey(Isolate* isolate,
+                                               TwoByteStringKey* key);
+template Handle<String> StringTable::LookupKey(Isolate* isolate,
+                                               SeqOneByteSubStringKey* key);
+
 Handle<String> StringTable::AddKeyNoResize(Isolate* isolate,
                                            StringTableKey* key) {
   Handle<StringTable> table = isolate->factory()->string_table();
@@ -6868,7 +6803,7 @@ Handle<String> StringTable::AddKeyNoResize(Isolate* isolate,
   DCHECK_EQ(table->FindEntry(isolate, key), kNotFound);
 
   // Add the new string and return it along with the string table.
-  int entry = table->FindInsertionEntry(key->Hash());
+  int entry = table->FindInsertionEntry(key->hash());
   table->set(EntryToIndex(entry), *string);
   table->ElementAdded();
 
@@ -6889,149 +6824,62 @@ Handle<StringTable> StringTable::CautiousShrink(Isolate* isolate,
 
 namespace {
 
-class StringTableNoAllocateKey : public StringTableKey {
- public:
-  StringTableNoAllocateKey(String string, uint64_t seed)
-      : StringTableKey(0), string_(string) {
-    StringShape shape(string);
-    one_byte_ = shape.encoding_tag() == kOneByteStringTag;
-    DCHECK(!shape.IsInternalized());
-    DCHECK(!shape.IsThin());
-    int length = string->length();
-    if (shape.IsCons() && length <= String::kMaxHashCalcLength) {
-      special_flattening_ = true;
-      uint32_t hash_field = 0;
-      if (one_byte_) {
-        if (V8_LIKELY(length <=
-                      static_cast<int>(arraysize(one_byte_buffer_)))) {
-          one_byte_content_ = one_byte_buffer_;
-        } else {
-          one_byte_content_ = new uint8_t[length];
-        }
-        String::WriteToFlat(string, one_byte_content_, 0, length);
-        hash_field =
-            StringHasher::HashSequentialString(one_byte_content_, length, seed);
-      } else {
-        if (V8_LIKELY(length <=
-                      static_cast<int>(arraysize(two_byte_buffer_)))) {
-          two_byte_content_ = two_byte_buffer_;
-        } else {
-          two_byte_content_ = new uint16_t[length];
-        }
-        String::WriteToFlat(string, two_byte_content_, 0, length);
-        hash_field =
-            StringHasher::HashSequentialString(two_byte_content_, length, seed);
-      }
-      string->set_hash_field(hash_field);
-    } else {
-      special_flattening_ = false;
-      one_byte_content_ = nullptr;
-      string->Hash();
-    }
+template <typename Char>
+Address LookupString(Isolate* isolate, String string, String source,
+                     size_t start) {
+  DisallowHeapAllocation no_gc;
+  StringTable table = isolate->heap()->string_table();
+  uint64_t seed = HashSeed(isolate);
 
-    DCHECK(string->HasHashCode());
-    set_hash_field(string->hash_field());
+  int length = string.length();
+
+  std::unique_ptr<Char[]> buffer;
+  const Char* chars;
+
+  if (source.IsConsString()) {
+    DCHECK(!source.IsFlat());
+    buffer.reset(new Char[length]);
+    String::WriteToFlat(source, buffer.get(), 0, length);
+    chars = buffer.get();
+  } else {
+    chars = source.GetChars<Char>(no_gc) + start;
+  }
+  // TODO(verwaest): Internalize to one-byte when possible.
+  SequentialStringKey<Char> key(Vector<const Char>(chars, length), seed);
+
+  // String could be an array index.
+  uint32_t hash_field = key.hash_field();
+
+  if (Name::ContainsCachedArrayIndex(hash_field)) {
+    return Smi::FromInt(String::ArrayIndexValueBits::decode(hash_field)).ptr();
   }
 
-  ~StringTableNoAllocateKey() override {
-    if (one_byte_) {
-      if (one_byte_content_ != one_byte_buffer_) delete[] one_byte_content_;
-    } else {
-      if (two_byte_content_ != two_byte_buffer_) delete[] two_byte_content_;
-    }
+  if ((hash_field & Name::kIsNotArrayIndexMask) == 0) {
+    // It is an indexed, but it's not cached.
+    return Smi::FromInt(ResultSentinel::kUnsupported).ptr();
   }
 
-  bool IsMatch(Object otherstring) override {
-    String other = String::cast(otherstring);
-    DCHECK(other->IsInternalizedString());
-    DCHECK(other->IsFlat());
-    if (Hash() != other->Hash()) return false;
-    int len = string_->length();
-    if (len != other->length()) return false;
-
-    DisallowHeapAllocation no_gc;
-    if (!special_flattening_) {
-      if (string_->Get(0) != other->Get(0)) return false;
-      if (string_->IsFlat()) {
-        StringShape shape1(string_);
-        StringShape shape2(other);
-        if (shape1.encoding_tag() == kOneByteStringTag &&
-            shape2.encoding_tag() == kOneByteStringTag) {
-          String::FlatContent flat1 = string_->GetFlatContent(no_gc);
-          String::FlatContent flat2 = other->GetFlatContent(no_gc);
-          return CompareRawStringContents(flat1.ToOneByteVector().start(),
-                                          flat2.ToOneByteVector().start(), len);
-        }
-        if (shape1.encoding_tag() == kTwoByteStringTag &&
-            shape2.encoding_tag() == kTwoByteStringTag) {
-          String::FlatContent flat1 = string_->GetFlatContent(no_gc);
-          String::FlatContent flat2 = other->GetFlatContent(no_gc);
-          return CompareRawStringContents(flat1.ToUC16Vector().start(),
-                                          flat2.ToUC16Vector().start(), len);
-        }
-      }
-      StringComparator comparator;
-      return comparator.Equals(string_, other);
-    }
-
-    String::FlatContent flat_content = other->GetFlatContent(no_gc);
-    if (one_byte_) {
-      if (flat_content.IsOneByte()) {
-        return CompareRawStringContents(
-            one_byte_content_, flat_content.ToOneByteVector().start(), len);
-      } else {
-        DCHECK(flat_content.IsTwoByte());
-        for (int i = 0; i < len; i++) {
-          if (flat_content.Get(i) != one_byte_content_[i]) return false;
-        }
-        return true;
-      }
-    } else {
-      if (flat_content.IsTwoByte()) {
-        return CompareRawStringContents(
-            two_byte_content_, flat_content.ToUC16Vector().start(), len);
-      } else {
-        DCHECK(flat_content.IsOneByte());
-        for (int i = 0; i < len; i++) {
-          if (flat_content.Get(i) != two_byte_content_[i]) return false;
-        }
-        return true;
-      }
-    }
+  int entry = table->FindEntry(ReadOnlyRoots(isolate), &key, key.hash());
+  if (entry == kNotFound) {
+    // A string that's not an array index, and not in the string table,
+    // cannot have been used as a property name before.
+    return Smi::FromInt(ResultSentinel::kNotFound).ptr();
   }
 
-  V8_WARN_UNUSED_RESULT Handle<String> AsHandle(Isolate* isolate) override {
-    UNREACHABLE();
+  String internalized = String::cast(table->KeyAt(entry));
+  if (FLAG_thin_strings) {
+    string->MakeThin(isolate, internalized);
   }
-
- private:
-  String string_;
-  bool one_byte_;
-  bool special_flattening_;
-  union {
-    uint8_t* one_byte_content_;
-    uint16_t* two_byte_content_;
-  };
-  union {
-    uint8_t one_byte_buffer_[256];
-    uint16_t two_byte_buffer_[128];
-  };
-};
+  return internalized.ptr();
+}
 
 }  // namespace
 
 // static
 Address StringTable::LookupStringIfExists_NoAllocate(Isolate* isolate,
                                                      Address raw_string) {
-  DisallowHeapAllocation no_gc;
   String string = String::cast(Object(raw_string));
-  Heap* heap = isolate->heap();
-  StringTable table = heap->string_table();
-
-  StringTableNoAllocateKey key(string, HashSeed(isolate));
-
-  // String could be an array index.
-  uint32_t hash = string->hash_field();
+  DCHECK(!string.IsInternalizedString());
 
   // Valid array indices are >= 0, so they cannot be mixed up with any of
   // the result sentinels, which are negative.
@@ -7040,37 +6888,23 @@ Address StringTable::LookupStringIfExists_NoAllocate(Isolate* isolate,
   STATIC_ASSERT(
       !String::ArrayIndexValueBits::is_valid(ResultSentinel::kNotFound));
 
-  if (Name::ContainsCachedArrayIndex(hash)) {
-    return Smi::FromInt(String::ArrayIndexValueBits::decode(hash)).ptr();
+  size_t start = 0;
+  String source = string;
+  if (source.IsSlicedString()) {
+    SlicedString sliced = SlicedString::cast(source);
+    start = sliced.offset();
+    source = sliced.parent();
+  } else if (source.IsConsString() && source.IsFlat()) {
+    source = ConsString::cast(source).first();
   }
-  if ((hash & Name::kIsNotArrayIndexMask) == 0) {
-    // It is an indexed, but it's not cached.
-    return Smi::FromInt(ResultSentinel::kUnsupported).ptr();
+  if (source.IsThinString()) {
+    source = ThinString::cast(source).actual();
+    if (start == 0) return source.ptr();
   }
-
-  DCHECK(!string->IsInternalizedString());
-  int entry = table->FindEntry(ReadOnlyRoots(isolate), &key, key.Hash());
-  if (entry != kNotFound) {
-    String internalized = String::cast(table->KeyAt(entry));
-    if (FLAG_thin_strings) {
-      MakeStringThin(string, internalized, isolate);
-    }
-    return internalized.ptr();
+  if (source.IsOneByteRepresentation()) {
+    return i::LookupString<uint8_t>(isolate, string, source, start);
   }
-  // A string that's not an array index, and not in the string table,
-  // cannot have been used as a property name before.
-  return Smi::FromInt(ResultSentinel::kNotFound).ptr();
-}
-
-String StringTable::ForwardStringIfExists(Isolate* isolate, StringTableKey* key,
-                                          String string) {
-  Handle<StringTable> table = isolate->factory()->string_table();
-  int entry = table->FindEntry(isolate, key);
-  if (entry == kNotFound) return String();
-
-  String canonical = String::cast(table->KeyAt(entry));
-  if (canonical != string) MakeStringThin(string, canonical, isolate);
-  return canonical;
+  return i::LookupString<uint16_t>(isolate, string, source, start);
 }
 
 Handle<StringSet> StringSet::New(Isolate* isolate) {
@@ -7151,8 +6985,8 @@ void AddToFeedbackCellsMap(Handle<CompilationCacheTable> cache, int cache_entry,
   // object used to be a FixedArray here).
   DCHECK(!obj->IsFixedArray());
   if (!obj->IsWeakFixedArray() || WeakFixedArray::cast(obj)->length() == 0) {
-    new_literals_map =
-        isolate->factory()->NewWeakFixedArray(kLiteralInitialLength, TENURED);
+    new_literals_map = isolate->factory()->NewWeakFixedArray(
+        kLiteralInitialLength, AllocationType::kOld);
     entry = 0;
   } else {
     Handle<WeakFixedArray> old_literals_map(WeakFixedArray::cast(obj), isolate);
@@ -7178,7 +7012,7 @@ void AddToFeedbackCellsMap(Handle<CompilationCacheTable> cache, int cache_entry,
     if (entry < 0) {
       // Copy old optimized code map and append one new entry.
       new_literals_map = isolate->factory()->CopyWeakFixedArrayAndGrow(
-          old_literals_map, kLiteralEntryLength, TENURED);
+          old_literals_map, kLiteralEntryLength, AllocationType::kOld);
       entry = old_literals_map->length();
     }
   }
@@ -7321,7 +7155,8 @@ Handle<CompilationCacheTable> CompilationCacheTable::PutEval(
       // and entry remains correct.
       AddToFeedbackCellsMap(cache, EntryToIndex(entry) + 2, native_context,
                             feedback_cell);
-      return cache;
+      // Add hash again even on cache hit to avoid unnecessary cache delay in
+      // case of hash collisions.
     }
   }
 
@@ -7392,16 +7227,15 @@ void CompilationCacheTable::Remove(Object value) {
       ElementRemoved();
     }
   }
-  return;
 }
 
 template <typename Derived, typename Shape>
 Handle<Derived> BaseNameDictionary<Derived, Shape>::New(
-    Isolate* isolate, int at_least_space_for, PretenureFlag pretenure,
+    Isolate* isolate, int at_least_space_for, AllocationType allocation,
     MinimumCapacity capacity_option) {
   DCHECK_LE(0, at_least_space_for);
   Handle<Derived> dict = Dictionary<Derived, Shape>::New(
-      isolate, at_least_space_for, pretenure, capacity_option);
+      isolate, at_least_space_for, allocation, capacity_option);
   dict->SetHash(PropertyArray::kNoHashSentinel);
   dict->SetNextEnumerationIndex(PropertyDetails::kInitialIndex);
   return dict;
@@ -7476,14 +7310,6 @@ BaseNameDictionary<Derived, Shape>::AddNoUpdateNextEnumerationIndex(
   return Dictionary<Derived, Shape>::Add(isolate, dictionary, key, value,
                                          details, entry_out);
 }
-
-// GCC workaround: Explicitly instantiate template method for NameDictionary
-// to avoid "undefined reference" issues during linking.
-template Handle<NameDictionary>
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::
-    AddNoUpdateNextEnumerationIndex(Isolate* isolate, Handle<NameDictionary>,
-                                    Handle<Name>, Handle<Object>,
-                                    PropertyDetails, int*);
 
 template <typename Derived, typename Shape>
 Handle<Derived> BaseNameDictionary<Derived, Shape>::Add(
@@ -7847,7 +7673,7 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(Isolate* isolate,
 
   // Key is already in table, just overwrite value.
   if (entry != kNotFound) {
-    table->set(Derived::EntryToIndex(entry) + 1, *value);
+    table->set(Derived::EntryToValueIndex(entry), *value);
     return table;
   }
 
@@ -7912,15 +7738,16 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Remove(
 template <typename Derived, typename Shape>
 void ObjectHashTableBase<Derived, Shape>::AddEntry(int entry, Object key,
                                                    Object value) {
-  this->set(Derived::EntryToIndex(entry), key);
-  this->set(Derived::EntryToIndex(entry) + 1, value);
-  this->ElementAdded();
+  Derived* self = static_cast<Derived*>(this);
+  self->set_key(Derived::EntryToIndex(entry), key);
+  self->set(Derived::EntryToValueIndex(entry), value);
+  self->ElementAdded();
 }
 
 template <typename Derived, typename Shape>
 void ObjectHashTableBase<Derived, Shape>::RemoveEntry(int entry) {
   this->set_the_hole(Derived::EntryToIndex(entry));
-  this->set_the_hole(Derived::EntryToIndex(entry) + 1);
+  this->set_the_hole(Derived::EntryToValueIndex(entry));
   this->ElementRemoved();
 }
 
@@ -8314,19 +8141,35 @@ Address Smi::LexicographicCompare(Isolate* isolate, Smi x, Smi y) {
 
 template class HashTable<StringTable, StringTableShape>;
 
-template class HashTable<CompilationCacheTable, CompilationCacheShape>;
+template class EXPORT_TEMPLATE_DEFINE(
+    V8_EXPORT_PRIVATE) HashTable<CompilationCacheTable, CompilationCacheShape>;
 
-template class HashTable<ObjectHashTable, ObjectHashTableShape>;
+template class EXPORT_TEMPLATE_DEFINE(
+    V8_EXPORT_PRIVATE) HashTable<ObjectHashTable, ObjectHashTableShape>;
 
-template class HashTable<EphemeronHashTable, EphemeronHashTableShape>;
+template class EXPORT_TEMPLATE_DEFINE(
+    V8_EXPORT_PRIVATE) HashTable<ObjectHashSet, ObjectHashSetShape>;
 
-template class ObjectHashTableBase<ObjectHashTable, ObjectHashTableShape>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    ObjectHashTableBase<ObjectHashTable, ObjectHashTableShape>;
 
-template class ObjectHashTableBase<EphemeronHashTable, EphemeronHashTableShape>;
+template class EXPORT_TEMPLATE_DEFINE(
+    V8_EXPORT_PRIVATE) HashTable<EphemeronHashTable, EphemeronHashTableShape>;
 
-template class Dictionary<NameDictionary, NameDictionaryShape>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    ObjectHashTableBase<EphemeronHashTable, EphemeronHashTableShape>;
 
-template class Dictionary<GlobalDictionary, GlobalDictionaryShape>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    BaseNameDictionary<NameDictionary, NameDictionaryShape>;
+
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>;
+
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    Dictionary<NameDictionary, NameDictionaryShape>;
+
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    Dictionary<GlobalDictionary, GlobalDictionaryShape>;
 
 template class EXPORT_TEMPLATE_DEFINE(
     V8_EXPORT_PRIVATE) HashTable<NumberDictionary, NumberDictionaryShape>;
@@ -8341,70 +8184,14 @@ template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
     Dictionary<SimpleNumberDictionary, SimpleNumberDictionaryShape>;
 
 template Handle<NameDictionary>
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::New(
-    Isolate*, int n, PretenureFlag pretenure, MinimumCapacity capacity_option);
-
-template Handle<GlobalDictionary>
-BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>::New(
-    Isolate*, int n, PretenureFlag pretenure, MinimumCapacity capacity_option);
-
-template Handle<NameDictionary>
 HashTable<NameDictionary, NameDictionaryShape>::New(Isolate*, int,
-                                                    PretenureFlag,
+                                                    AllocationType,
                                                     MinimumCapacity);
 
-template Handle<ObjectHashSet>
-HashTable<ObjectHashSet, ObjectHashSetShape>::New(Isolate*, int n,
-                                                  PretenureFlag,
-                                                  MinimumCapacity);
-
-template Handle<NameDictionary>
+template V8_EXPORT_PRIVATE Handle<NameDictionary>
 HashTable<NameDictionary, NameDictionaryShape>::Shrink(Isolate* isolate,
                                                        Handle<NameDictionary>,
                                                        int additionalCapacity);
-
-template Handle<NameDictionary>
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::Add(
-    Isolate* isolate, Handle<NameDictionary>, Handle<Name>, Handle<Object>,
-    PropertyDetails, int*);
-
-template Handle<GlobalDictionary>
-BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>::Add(
-    Isolate* isolate, Handle<GlobalDictionary>, Handle<Name>, Handle<Object>,
-    PropertyDetails, int*);
-
-template void HashTable<GlobalDictionary, GlobalDictionaryShape>::Rehash(
-    ReadOnlyRoots roots);
-
-template Handle<NameDictionary>
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::EnsureCapacity(
-    Isolate* isolate, Handle<NameDictionary>, int);
-
-template void
-BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>::CopyEnumKeysTo(
-    Isolate* isolate, Handle<GlobalDictionary> dictionary,
-    Handle<FixedArray> storage, KeyCollectionMode mode,
-    KeyAccumulator* accumulator);
-
-template void
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::CopyEnumKeysTo(
-    Isolate* isolate, Handle<NameDictionary> dictionary,
-    Handle<FixedArray> storage, KeyCollectionMode mode,
-    KeyAccumulator* accumulator);
-
-template Handle<FixedArray>
-BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>::IterationIndices(
-    Isolate* isolate, Handle<GlobalDictionary> dictionary);
-template void
-BaseNameDictionary<GlobalDictionary, GlobalDictionaryShape>::CollectKeysTo(
-    Handle<GlobalDictionary> dictionary, KeyAccumulator* keys);
-
-template Handle<FixedArray>
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::IterationIndices(
-    Isolate* isolate, Handle<NameDictionary> dictionary);
-template void
-BaseNameDictionary<NameDictionary, NameDictionaryShape>::CollectKeysTo(
-    Handle<NameDictionary> dictionary, KeyAccumulator* keys);
 
 void JSFinalizationGroup::Cleanup(
     Handle<JSFinalizationGroup> finalization_group, Isolate* isolate) {
@@ -8421,7 +8208,7 @@ void JSFinalizationGroup::Cleanup(
           isolate);
       iterator = Handle<JSFinalizationGroupCleanupIterator>::cast(
           isolate->factory()->NewJSObjectFromMap(
-              cleanup_iterator_map, NOT_TENURED,
+              cleanup_iterator_map, AllocationType::kYoung,
               Handle<AllocationSite>::null()));
       iterator->set_finalization_group(*finalization_group);
     }

@@ -15,8 +15,6 @@ namespace v8 {
 namespace internal {
 
 class CodeDataContainer;
-class MaybeObject;
-class Object;
 
 #define ROOT_ID_LIST(V)                                \
   V(kStringTable, "(Internalized strings)")            \
@@ -117,6 +115,12 @@ class ObjectVisitor {
   }
   virtual void VisitCustomWeakPointer(HeapObject host, ObjectSlot p) {
     VisitCustomWeakPointers(host, p, p + 1);
+  }
+
+  virtual void VisitEphemeron(HeapObject host, int index, ObjectSlot key,
+                              ObjectSlot value) {
+    VisitPointer(host, key);
+    VisitPointer(host, value);
   }
 
   // To allow lazy clearing of inline caches the visitor has

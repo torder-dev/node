@@ -5,9 +5,10 @@
 #include "src/snapshot/partial-serializer.h"
 #include "src/snapshot/startup-serializer.h"
 
-#include "src/api-inl.h"
-#include "src/math-random.h"
+#include "src/api/api-inl.h"
+#include "src/heap/combined-heap.h"
 #include "src/microtask-queue.h"
+#include "src/numbers/math-random.h"
 #include "src/objects-inl.h"
 #include "src/objects/slots.h"
 
@@ -101,6 +102,12 @@ void PartialSerializer::SerializeObject(HeapObject obj) {
   // Clear literal boilerplates and feedback.
   if (obj->IsFeedbackVector()) FeedbackVector::cast(obj)->ClearSlots(isolate());
 
+  // Clear InterruptBudget when serializing FeedbackCell.
+  if (obj->IsFeedbackCell()) {
+    FeedbackCell::cast(obj)->set_interrupt_budget(
+        FeedbackCell::GetInitialInterruptBudget());
+  }
+
   if (SerializeJSObjectWithEmbedderFields(obj)) {
     return;
   }
@@ -143,7 +150,6 @@ bool PartialSerializer::SerializeJSObjectWithEmbedderFields(Object obj) {
   int embedder_fields_count = js_obj->GetEmbedderFieldCount();
   if (embedder_fields_count == 0) return false;
   CHECK_GT(embedder_fields_count, 0);
-  DCHECK_NOT_NULL(serialize_embedder_fields_.callback);
   DCHECK(!js_obj->NeedsRehashing());
 
   DisallowHeapAllocation no_gc;
@@ -166,12 +172,20 @@ bool PartialSerializer::SerializeJSObjectWithEmbedderFields(Object obj) {
     original_embedder_values.emplace_back(embedder_data_slot.load_raw(no_gc));
     Object object = embedder_data_slot.load_tagged();
     if (object->IsHeapObject()) {
-      DCHECK(isolate()->heap()->Contains(HeapObject::cast(object)));
+      DCHECK(IsValidHeapObject(isolate()->heap(), HeapObject::cast(object)));
       serialized_data.push_back({nullptr, 0});
     } else {
-      StartupData data = serialize_embedder_fields_.callback(
-          api_obj, i, serialize_embedder_fields_.data);
-      serialized_data.push_back(data);
+      // If no serializer is provided and the field was empty, we serialize it
+      // by default to nullptr.
+      if (serialize_embedder_fields_.callback == nullptr &&
+          object->ptr() == 0) {
+        serialized_data.push_back({nullptr, 0});
+      } else {
+        DCHECK_NOT_NULL(serialize_embedder_fields_.callback);
+        StartupData data = serialize_embedder_fields_.callback(
+            api_obj, i, serialize_embedder_fields_.data);
+        serialized_data.push_back(data);
+      }
     }
   }
 

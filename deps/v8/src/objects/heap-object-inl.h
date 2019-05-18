@@ -17,9 +17,6 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(HeapObject, Object)
-CAST_ACCESSOR(HeapObject)
-
 HeapObject::HeapObject(Address ptr, AllowInlineSmiStorage allow_smi)
     : Object(ptr) {
   SLOW_DCHECK(
@@ -27,15 +24,12 @@ HeapObject::HeapObject(Address ptr, AllowInlineSmiStorage allow_smi)
       IsHeapObject());
 }
 
-HeapObject HeapObject::FromAddress(Address address) {
-  DCHECK_TAG_ALIGNED(address);
-  return HeapObject(address + kHeapObjectTag);
-}
-
+// static
 Heap* NeverReadOnlySpaceObject::GetHeap(const HeapObject object) {
   return GetHeapFromWritableObject(object);
 }
 
+// static
 Isolate* NeverReadOnlySpaceObject::GetIsolate(const HeapObject object) {
   return Isolate::FromHeap(GetHeap(object));
 }

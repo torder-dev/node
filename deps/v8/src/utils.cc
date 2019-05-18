@@ -23,13 +23,15 @@ SimpleStringBuilder::SimpleStringBuilder(int size) {
 
 
 void SimpleStringBuilder::AddString(const char* s) {
-  AddSubstring(s, StrLength(s));
+  size_t len = strlen(s);
+  DCHECK_GE(kMaxInt, len);
+  AddSubstring(s, static_cast<int>(len));
 }
 
 
 void SimpleStringBuilder::AddSubstring(const char* s, int n) {
   DCHECK(!is_finalized() && position_ + n <= buffer_.length());
-  DCHECK(static_cast<size_t>(n) <= strlen(s));
+  DCHECK_LE(n, strlen(s));
   MemCopy(&buffer_[position_], s, n * kCharSize);
   position_ += n;
 }
@@ -71,10 +73,10 @@ char* SimpleStringBuilder::Finalize() {
   buffer_[position_] = '\0';
   // Make sure nobody managed to add a 0-character to the
   // buffer while building the string.
-  DCHECK(strlen(buffer_.start()) == static_cast<size_t>(position_));
+  DCHECK(strlen(buffer_.begin()) == static_cast<size_t>(position_));
   position_ = -1;
   DCHECK(is_finalized());
-  return buffer_.start();
+  return buffer_.begin();
 }
 
 std::ostream& operator<<(std::ostream& os, FeedbackSlot slot) {
@@ -137,12 +139,12 @@ int SNPrintF(Vector<char> str, const char* format, ...) {
 
 
 int VSNPrintF(Vector<char> str, const char* format, va_list args) {
-  return base::OS::VSNPrintF(str.start(), str.length(), format, args);
+  return base::OS::VSNPrintF(str.begin(), str.length(), format, args);
 }
 
 
 void StrNCpy(Vector<char> dest, const char* src, size_t n) {
-  base::OS::StrNCpy(dest.start(), dest.length(), src, n);
+  base::OS::StrNCpy(dest.begin(), dest.length(), src, n);
 }
 
 
@@ -154,7 +156,7 @@ void Flush(FILE* out) {
 char* ReadLine(const char* prompt) {
   char* result = nullptr;
   char line_buf[256];
-  int offset = 0;
+  size_t offset = 0;
   bool keep_going = true;
   fprintf(stdout, "%s", prompt);
   fflush(stdout);
@@ -166,7 +168,7 @@ char* ReadLine(const char* prompt) {
       }
       return nullptr;
     }
-    int len = StrLength(line_buf);
+    size_t len = strlen(line_buf);
     if (len > 1 &&
         line_buf[len - 2] == '\\' &&
         line_buf[len - 1] == '\n') {
@@ -185,7 +187,7 @@ char* ReadLine(const char* prompt) {
       result = NewArray<char>(len + 1);
     } else {
       // Allocate a new result with enough room for the new addition.
-      int new_len = offset + len + 1;
+      size_t new_len = offset + len + 1;
       char* new_result = NewArray<char>(new_len);
       // Copy the existing input into the new array and set the new
       // array as the result.
@@ -241,7 +243,7 @@ std::vector<char> ReadCharsFromFile(const char* filename, bool* exists,
 }
 
 std::string VectorToString(const std::vector<char>& chars) {
-  if (chars.size() == 0) {
+  if (chars.empty()) {
     return std::string();
   }
   return std::string(chars.begin(), chars.end());

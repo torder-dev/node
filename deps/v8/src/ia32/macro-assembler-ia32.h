@@ -26,9 +26,7 @@ enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
 
 class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
  public:
-  template <typename... Args>
-  explicit TurboAssembler(Args&&... args)
-      : TurboAssemblerBase(std::forward<Args>(args)...) {}
+  using TurboAssemblerBase::TurboAssemblerBase;
 
   void CheckPageFlag(Register object, Register scratch, int mask, Condition cc,
                      Label* condition_met,
@@ -42,17 +40,17 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   }
   void LeaveFrame(StackFrame::Type type);
 
-// Allocate a stack frame of given size (i.e. decrement {esp} by the value
-// stored in the given register).
+// Allocate stack space of given size (i.e. decrement {esp} by the value
+// stored in the given register, or by a constant). If you need to perform a
+// stack check, do it before calling this function because this function may
+// write into the newly allocated space. It may also overwrite the given
+// register's value, in the version that takes a register.
 #ifdef V8_OS_WIN
-  // On win32, take special care if the number of bytes is greater than 4096:
-  // Ensure that each page within the new stack frame is touched once in
-  // decreasing order. See
-  // https://msdn.microsoft.com/en-us/library/aa227153(v=vs.60).aspx.
-  // Use {bytes_scratch} as scratch register for this procedure.
-  void AllocateStackFrame(Register bytes_scratch);
+  void AllocateStackSpace(Register bytes_scratch);
+  void AllocateStackSpace(int bytes);
 #else
-  void AllocateStackFrame(Register bytes) { sub(esp, bytes); }
+  void AllocateStackSpace(Register bytes) { sub(esp, bytes); }
+  void AllocateStackSpace(int bytes) { sub(esp, Immediate(bytes)); }
 #endif
 
   // Print a message to stdout and abort execution.
@@ -284,6 +282,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   AVX_OP3_XO(Punpckhbw, punpckhbw)
   AVX_OP3_XO(Pxor, pxor)
   AVX_OP3_XO(Andps, andps)
+  AVX_OP3_XO(Andnps, andnps)
   AVX_OP3_XO(Andpd, andpd)
   AVX_OP3_XO(Xorps, xorps)
   AVX_OP3_XO(Xorpd, xorpd)
@@ -390,6 +389,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void CallRecordWriteStub(Register object, Register address,
                            RememberedSetAction remembered_set_action,
                            SaveFPRegsMode fp_mode, Address wasm_target);
+  void CallEphemeronKeyBarrier(Register object, Register address,
+                               SaveFPRegsMode fp_mode);
 
   // Calculate how much stack space (in bytes) are required to store caller
   // registers excluding those specified in the arguments.
@@ -430,9 +431,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 // MacroAssembler implements a collection of frequently used macros.
 class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
  public:
-  template <typename... Args>
-  explicit MacroAssembler(Args&&... args)
-      : TurboAssembler(std::forward<Args>(args)...) {}
+  using TurboAssembler::TurboAssembler;
 
   // Load a register with a long value as efficiently as possible.
   void Set(Register dst, int32_t x) {

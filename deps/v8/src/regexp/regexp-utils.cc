@@ -89,7 +89,7 @@ MaybeHandle<Object> RegExpUtils::RegExpExec(Isolate* isolate,
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        Execution::Call(isolate, exec, regexp, argc, argv.start()), Object);
+        Execution::Call(isolate, exec, regexp, argc, argv.begin()), Object);
 
     if (!result->IsJSReceiver() && !result->IsNull(isolate)) {
       THROW_NEW_ERROR(isolate,
@@ -115,7 +115,7 @@ MaybeHandle<Object> RegExpUtils::RegExpExec(Isolate* isolate,
     ScopedVector<Handle<Object>> argv(argc);
     argv[0] = string;
 
-    return Execution::Call(isolate, regexp_exec, regexp, argc, argv.start());
+    return Execution::Call(isolate, regexp_exec, regexp, argc, argv.begin());
   }
 }
 
@@ -168,17 +168,15 @@ bool RegExpUtils::IsUnmodifiedRegExp(Isolate* isolate, Handle<Object> obj) {
   }
 
   // Check that the "exec" method is unmodified.
-  if (FLAG_track_constant_fields) {
-    // Check that the index refers to "exec" method (this has to be consistent
-    // with the init order in the bootstrapper).
-    DCHECK_EQ(*(isolate->factory()->exec_string()),
-              proto_map->instance_descriptors()->GetKey(
-                  JSRegExp::kExecFunctionDescriptorIndex));
-    if (proto_map->instance_descriptors()
-            ->GetDetails(JSRegExp::kExecFunctionDescriptorIndex)
-            .constness() != PropertyConstness::kConst) {
-      return false;
-    }
+  // Check that the index refers to "exec" method (this has to be consistent
+  // with the init order in the bootstrapper).
+  DCHECK_EQ(*(isolate->factory()->exec_string()),
+            proto_map->instance_descriptors()->GetKey(
+                JSRegExp::kExecFunctionDescriptorIndex));
+  if (proto_map->instance_descriptors()
+          ->GetDetails(JSRegExp::kExecFunctionDescriptorIndex)
+          .constness() != PropertyConstness::kConst) {
+    return false;
   }
 
   if (!isolate->IsRegExpSpeciesLookupChainIntact()) return false;

@@ -4,12 +4,14 @@
 
 #include "src/optimized-compilation-info.h"
 
-#include "src/api.h"
+#include "src/api/api.h"
 #include "src/debug/debug.h"
 #include "src/isolate.h"
 #include "src/objects-inl.h"
 #include "src/objects/shared-function-info.h"
 #include "src/source-position.h"
+#include "src/tracing/trace-event.h"
+#include "src/tracing/traced-value.h"
 #include "src/wasm/function-compiler.h"
 
 namespace v8 {
@@ -81,10 +83,17 @@ void OptimizedCompilationInfo::ConfigureFlags() {
 #endif  // ENABLE_GDB_JIT_INTERFACE && DEBUG
       break;
     case Code::WASM_FUNCTION:
+    case Code::WASM_TO_CAPI_FUNCTION:
       SetFlag(kSwitchJumpTableEnabled);
       break;
     default:
       break;
+  }
+
+  if (FLAG_turbo_control_flow_aware_allocation) {
+    MarkAsTurboControlFlowAwareAllocation();
+  } else {
+    MarkAsTurboPreprocessRanges();
   }
 }
 
@@ -118,14 +127,36 @@ void OptimizedCompilationInfo::ReopenHandlesInNewHandleScope(Isolate* isolate) {
   }
 }
 
+void OptimizedCompilationInfo::AbortOptimization(BailoutReason reason) {
+  DCHECK_NE(reason, BailoutReason::kNoReason);
+  if (bailout_reason_ == BailoutReason::kNoReason) {
+    TRACE_EVENT_INSTANT2(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                         "V8.AbortOptimization", TRACE_EVENT_SCOPE_THREAD,
+                         "reason", GetBailoutReason(reason), "function",
+                         shared_info()->TraceIDRef());
+    bailout_reason_ = reason;
+  }
+  SetFlag(kDisableFutureOptimization);
+}
+
+void OptimizedCompilationInfo::RetryOptimization(BailoutReason reason) {
+  DCHECK_NE(reason, BailoutReason::kNoReason);
+  if (GetFlag(kDisableFutureOptimization)) return;
+  TRACE_EVENT_INSTANT2(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                       "V8.RetryOptimization", TRACE_EVENT_SCOPE_THREAD,
+                       "reason", GetBailoutReason(reason), "function",
+                       shared_info()->TraceIDRef());
+  bailout_reason_ = reason;
+}
+
 std::unique_ptr<char[]> OptimizedCompilationInfo::GetDebugName() const {
   if (!shared_info().is_null()) {
     return shared_info()->DebugName()->ToCString();
   }
   Vector<const char> name_vec = debug_name_;
-  if (name_vec.is_empty()) name_vec = ArrayVector("unknown");
+  if (name_vec.empty()) name_vec = ArrayVector("unknown");
   std::unique_ptr<char[]> name(new char[name_vec.length() + 1]);
-  memcpy(name.get(), name_vec.start(), name_vec.length());
+  memcpy(name.get(), name_vec.begin(), name_vec.length());
   name[name_vec.length()] = '\0';
   return name;
 }
@@ -137,6 +168,7 @@ StackFrame::Type OptimizedCompilationInfo::GetOutputStackFrameType() const {
     case Code::BUILTIN:
       return StackFrame::STUB;
     case Code::WASM_FUNCTION:
+    case Code::WASM_TO_CAPI_FUNCTION:
       return StackFrame::WASM_COMPILED;
     case Code::JS_TO_WASM_FUNCTION:
       return StackFrame::JS_TO_WASM;
@@ -207,10 +239,37 @@ OptimizedCompilationInfo::InlinedFunctionHolder::InlinedFunctionHolder(
     Handle<SharedFunctionInfo> inlined_shared_info,
     Handle<BytecodeArray> inlined_bytecode, SourcePosition pos)
     : shared_info(inlined_shared_info), bytecode_array(inlined_bytecode) {
-  DCHECK_EQ(shared_info->GetBytecodeArray(), *bytecode_array);
   position.position = pos;
   // initialized when generating the deoptimization literals
   position.inlined_function_id = DeoptimizationData::kNotInlinedIndex;
+}
+
+std::unique_ptr<v8::tracing::TracedValue>
+OptimizedCompilationInfo::ToTracedValue() {
+  auto value = v8::tracing::TracedValue::Create();
+  value->SetBoolean("osr", is_osr());
+  value->SetBoolean("functionContextSpecialized",
+                    is_function_context_specializing());
+  if (has_shared_info()) {
+    value->SetValue("function", shared_info()->TraceIDRef());
+  }
+  if (bailout_reason() != BailoutReason::kNoReason) {
+    value->SetString("bailoutReason", GetBailoutReason(bailout_reason()));
+    value->SetBoolean("disableFutureOptimization",
+                      is_disable_future_optimization());
+  } else {
+    value->SetInteger("optimizationId", optimization_id());
+    value->BeginArray("inlinedFunctions");
+    for (auto const& inlined_function : inlined_functions()) {
+      value->BeginDictionary();
+      value->SetValue("function", inlined_function.shared_info->TraceIDRef());
+      // TODO(bmeurer): Also include the source position from the
+      // {inlined_function} here as dedicated "sourcePosition" field.
+      value->EndDictionary();
+    }
+    value->EndArray();
+  }
+  return value;
 }
 
 }  // namespace internal

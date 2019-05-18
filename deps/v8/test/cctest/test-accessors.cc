@@ -29,7 +29,7 @@
 
 #include "src/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/frames-inl.h"
 #include "src/string-stream.h"
 #include "test/cctest/cctest.h"
@@ -801,7 +801,8 @@ TEST(PrototypeGetterAccessCheck) {
       "    x = obj.foo;"
       "  }"
       "  return x;"
-      "}");
+      "};"
+      "%PrepareFunctionForOptimization(f);");
 
   security_check_value = true;
   ExpectInt32("f()", 907);

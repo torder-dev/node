@@ -14,6 +14,7 @@
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
 #include "src/disasm.h"
+#include "src/heap/combined-heap.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/ostreams.h"
@@ -203,7 +204,7 @@ void PPCDebugger::Debug() {
       // use a reasonably large buffer
       v8::internal::EmbeddedVector<char, 256> buffer;
       dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(sim_->get_pc()));
-      PrintF("  0x%08" V8PRIxPTR "  %s\n", sim_->get_pc(), buffer.start());
+      PrintF("  0x%08" V8PRIxPTR "  %s\n", sim_->get_pc(), buffer.begin());
       last_pc = sim_->get_pc();
     }
     char* line = ReadLine("sim> ");
@@ -245,7 +246,7 @@ void PPCDebugger::Debug() {
             dasm.InstructionDecode(buffer,
                                    reinterpret_cast<byte*>(sim_->get_pc()));
             PrintF("  0x%08" V8PRIxPTR "  %s\n", sim_->get_pc(),
-                   buffer.start());
+                   buffer.begin());
             sim_->ExecuteInstruction(
                 reinterpret_cast<Instruction*>(sim_->get_pc()));
           }
@@ -401,7 +402,8 @@ void PPCDebugger::Debug() {
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
           Object obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
-          if (obj.IsSmi() || current_heap->Contains(HeapObject::cast(obj))) {
+          if (obj.IsSmi() ||
+              IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
             PrintF(" (");
             if (obj.IsSmi()) {
               PrintF("smi %d", Smi::ToInt(obj));
@@ -458,7 +460,7 @@ void PPCDebugger::Debug() {
           prev = cur;
           cur += dasm.InstructionDecode(buffer, cur);
           PrintF("  0x%08" V8PRIxPTR "  %s\n", reinterpret_cast<intptr_t>(prev),
-                 buffer.start());
+                 buffer.begin());
         }
       } else if (strcmp(cmd, "gdb") == 0) {
         PrintF("relinquishing control to gdb\n");
@@ -838,6 +840,8 @@ bool Simulator::has_bad_pc() const {
 // Raw access to the PC register without the special adjustment when reading.
 intptr_t Simulator::get_pc() const { return special_reg_pc_; }
 
+// Accessor to the internal Link Register
+intptr_t Simulator::get_lr() const { return special_reg_lr_; }
 
 // Runtime FP routines take:
 // - two double arguments
@@ -3702,7 +3706,7 @@ void Simulator::Trace(Instruction* instr) {
   v8::internal::EmbeddedVector<char, 256> buffer;
   dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(instr));
   PrintF("%05d  %08" V8PRIxPTR "  %s\n", icount_,
-         reinterpret_cast<intptr_t>(instr), buffer.start());
+         reinterpret_cast<intptr_t>(instr), buffer.begin());
 }
 
 
@@ -3982,7 +3986,7 @@ void Simulator::GlobalMonitor::NotifyStore(uintptr_t addr, TransactionSize size,
         tagged_addr_ + static_cast<uintptr_t>(size_);
     bool is_not_overlapped = transaction_end < exclusive_transaction_start ||
                              exclusive_transaction_end < transaction_start;
-    if (!is_not_overlapped && !thread_id_.Equals(thread_id)) {
+    if (!is_not_overlapped && thread_id_ != thread_id) {
       Clear();
     }
   }
@@ -3993,7 +3997,7 @@ bool Simulator::GlobalMonitor::NotifyStoreExcl(uintptr_t addr,
                                                ThreadId thread_id) {
   bool permission = access_state_ == MonitorAccess::Exclusive &&
                     addr == tagged_addr_ && size_ == size &&
-                    thread_id_.Equals(thread_id);
+                    thread_id_ == thread_id;
   // The reservation is cleared if the processor holding the reservation
   // executes a store conditional instruction to any address.
   Clear();

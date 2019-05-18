@@ -351,7 +351,7 @@ uint32_t RelocInfo::wasm_call_tag() const {
 Operand::Operand(Handle<HeapObject> handle) {
   rm_ = no_reg;
   value_.immediate = static_cast<intptr_t>(handle.address());
-  rmode_ = RelocInfo::EMBEDDED_OBJECT;
+  rmode_ = RelocInfo::FULL_EMBEDDED_OBJECT;
 }
 
 
@@ -387,14 +387,14 @@ Operand::Operand(Register rm, ShiftOp shift_op, Register rs) {
 Operand Operand::EmbeddedNumber(double value) {
   int32_t smi;
   if (DoubleToSmiInteger(value, &smi)) return Operand(Smi::FromInt(smi));
-  Operand result(0, RelocInfo::EMBEDDED_OBJECT);
+  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.is_heap_object_request_ = true;
   result.value_.heap_object_request = HeapObjectRequest(value);
   return result;
 }
 
 Operand Operand::EmbeddedStringConstant(const StringConstantBase* str) {
-  Operand result(0, RelocInfo::EMBEDDED_OBJECT);
+  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
   result.is_heap_object_request_ = true;
   result.value_.heap_object_request = HeapObjectRequest(str);
   return result;
@@ -450,7 +450,6 @@ void NeonMemOperand::SetAlignment(int align) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
 }
 
@@ -460,8 +459,8 @@ void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
     Handle<HeapObject> object;
     switch (request.kind()) {
       case HeapObjectRequest::kHeapNumber:
-        object =
-            isolate->factory()->NewHeapNumber(request.heap_number(), TENURED);
+        object = isolate->factory()->NewHeapNumber(request.heap_number(),
+                                                   AllocationType::kOld);
         break;
       case HeapObjectRequest::kStringConstant: {
         const StringConstantBase* str = request.string();
@@ -3952,7 +3951,6 @@ static int EncodeScalar(NeonDataType dt, int index) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
   return (opc1_opc2 >> 2) * B21 | (opc1_opc2 & 0x3) * B5;
 }
@@ -4003,7 +4001,6 @@ void Assembler::vdup(NeonSize size, QwNeonRegister dst, Register src) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   dst.split_code(&vd, &d);
@@ -4137,7 +4134,6 @@ static Instr EncodeNeonUnaryOp(UnaryOp op, NeonRegType reg_type, NeonSize size,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   NeonSplitCode(reg_type, dst_code, &vd, &d, &op_encoding);
@@ -4231,7 +4227,6 @@ static Instr EncodeNeonBinaryBitwiseOp(BinaryBitwiseOp op, NeonRegType reg_type,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   NeonSplitCode(reg_type, dst_code, &vd, &d, &op_encoding);
@@ -4338,7 +4333,6 @@ static Instr EncodeNeonBinOp(FPBinOp op, QwNeonRegister dst,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   dst.split_code(&vd, &d);
@@ -4404,7 +4398,6 @@ static Instr EncodeNeonBinOp(IntegerBinOp op, NeonDataType dt,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   dst.split_code(&vd, &d);
@@ -4560,7 +4553,6 @@ static Instr EncodeNeonShiftOp(NeonShiftOp op, NeonSize size, bool is_unsigned,
     }
     default:
       UNREACHABLE();
-      break;
   }
 
   int vd, d;
@@ -4667,7 +4659,6 @@ static Instr EncodeNeonPairwiseOp(NeonPairwiseOp op, NeonDataType dt,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   dst.split_code(&vd, &d);
@@ -4819,7 +4810,6 @@ static Instr EncodeNeonSizedOp(NeonSizedOp op, NeonRegType reg_type,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   int vd, d;
   NeonSplitCode(reg_type, dst_code, &vd, &d, &op_encoding);

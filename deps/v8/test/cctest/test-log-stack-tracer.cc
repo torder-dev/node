@@ -30,7 +30,7 @@
 #include <stdlib.h>
 
 #include "include/v8-profiler.h"
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/disassembler.h"
 #include "src/isolate.h"
 #include "src/objects-inl.h"
@@ -130,7 +130,7 @@ static void CreateTraceCallerFunction(v8::Local<v8::Context> context,
   CreateFramePointerGrabberConstructor(context, "FPGrabber");
 
   // Compile the script.
-  CompileRun(trace_call_buf.start());
+  CompileRun(trace_call_buf.begin());
 }
 
 

@@ -4,10 +4,10 @@
 
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
-#include "src/conversions.h"
 #include "src/counters.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/maybe-handles-inl.h"
+#include "src/numbers/conversions.h"
 #include "src/objects-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 
@@ -203,7 +203,7 @@ static Object SliceHelper(BuiltinArguments args, Isolate* isolate,
 
     Handle<Object> new_obj;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-        isolate, new_obj, Execution::New(isolate, ctor, argc, argv.start()));
+        isolate, new_obj, Execution::New(isolate, ctor, argc, argv.begin()));
 
     new_ = Handle<JSReceiver>::cast(new_obj);
   }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/counters.h"
@@ -145,7 +145,7 @@ BUILTIN(ConsoleContext) {
   Handle<JSObject> prototype = factory->NewJSObject(isolate->object_function());
   JSFunction::SetPrototype(cons, prototype);
 
-  Handle<JSObject> context = factory->NewJSObject(cons, TENURED);
+  Handle<JSObject> context = factory->NewJSObject(cons, AllocationType::kOld);
   DCHECK(context->IsJSObject());
   int id = isolate->last_console_context_id() + 1;
   isolate->set_last_console_context_id(id);

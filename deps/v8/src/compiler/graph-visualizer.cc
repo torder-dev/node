@@ -222,13 +222,13 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
       String str = String::cast(source_name);
       if (str->length() > 0) {
         SNPrintF(source_file, "%s", str->ToCString().get());
-        std::replace(source_file.start(),
-                     source_file.start() + source_file.length(), '/', '_');
+        std::replace(source_file.begin(),
+                     source_file.begin() + source_file.length(), '/', '_');
         source_available = true;
       }
     }
   }
-  std::replace(filename.start(), filename.start() + filename.length(), ' ',
+  std::replace(filename.begin(), filename.begin() + filename.length(), ' ',
                '_');
 
   EmbeddedVector<char, 256> base_dir;
@@ -241,21 +241,21 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
 
   EmbeddedVector<char, 256> full_filename;
   if (phase == nullptr && !source_available) {
-    SNPrintF(full_filename, "%s%s.%s", base_dir.start(), filename.start(),
+    SNPrintF(full_filename, "%s%s.%s", base_dir.begin(), filename.begin(),
              suffix);
   } else if (phase != nullptr && !source_available) {
-    SNPrintF(full_filename, "%s%s-%s.%s", base_dir.start(), filename.start(),
+    SNPrintF(full_filename, "%s%s-%s.%s", base_dir.begin(), filename.begin(),
              phase, suffix);
   } else if (phase == nullptr && source_available) {
-    SNPrintF(full_filename, "%s%s_%s.%s", base_dir.start(), filename.start(),
-             source_file.start(), suffix);
+    SNPrintF(full_filename, "%s%s_%s.%s", base_dir.begin(), filename.begin(),
+             source_file.begin(), suffix);
   } else {
-    SNPrintF(full_filename, "%s%s_%s-%s.%s", base_dir.start(), filename.start(),
-             source_file.start(), phase, suffix);
+    SNPrintF(full_filename, "%s%s_%s-%s.%s", base_dir.begin(), filename.begin(),
+             source_file.begin(), phase, suffix);
   }
 
   char* buffer = new char[full_filename.length() + 1];
-  memcpy(buffer, full_filename.start(), full_filename.length());
+  memcpy(buffer, full_filename.begin(), full_filename.length());
   buffer[full_filename.length()] = '\0';
   return std::unique_ptr<char[]>(buffer);
 }
@@ -1172,7 +1172,8 @@ std::ostream& operator<<(std::ostream& os, const InstructionBlockAsJSON& b) {
   const InstructionSequence* code = b.code_;
   os << "{";
   os << "\"id\": " << block->rpo_number() << ",";
-  os << "\"deferred\": " << block->IsDeferred() << ",";
+  os << "\"deferred\": " << (block->IsDeferred() ? "true" : "false");
+  os << ",";
   os << "\"loop_header\": " << block->IsLoopHeader() << ",";
   if (block->IsLoopHeader()) {
     os << "\"loop_end\": " << block->loop_end() << ",";

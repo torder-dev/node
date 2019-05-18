@@ -5,9 +5,10 @@
 #include "src/objects/string.h"
 
 #include "src/char-predicates.h"
-#include "src/conversions.h"
 #include "src/handles-inl.h"
 #include "src/heap/heap-inl.h"  // For LooksValid implementation.
+#include "src/heap/read-only-heap.h"
+#include "src/numbers/conversions.h"
 #include "src/objects/map.h"
 #include "src/objects/oddball.h"
 #include "src/objects/string-comparator.h"
@@ -23,7 +24,7 @@ namespace v8 {
 namespace internal {
 
 Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
-                                   PretenureFlag pretenure) {
+                                   AllocationType allocation) {
   DCHECK_NE(cons->second()->length(), 0);
 
   // TurboFan can create cons strings with empty first parts.
@@ -40,19 +41,22 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
 
   DCHECK(AllowHeapAllocation::IsAllowed());
   int length = cons->length();
-  PretenureFlag tenure = ObjectInYoungGeneration(*cons) ? pretenure : TENURED;
+  allocation =
+      ObjectInYoungGeneration(*cons) ? allocation : AllocationType::kOld;
   Handle<SeqString> result;
   if (cons->IsOneByteRepresentation()) {
-    Handle<SeqOneByteString> flat = isolate->factory()
-                                        ->NewRawOneByteString(length, tenure)
-                                        .ToHandleChecked();
+    Handle<SeqOneByteString> flat =
+        isolate->factory()
+            ->NewRawOneByteString(length, allocation)
+            .ToHandleChecked();
     DisallowHeapAllocation no_gc;
     WriteToFlat(*cons, flat->GetChars(no_gc), 0, length);
     result = flat;
   } else {
-    Handle<SeqTwoByteString> flat = isolate->factory()
-                                        ->NewRawTwoByteString(length, tenure)
-                                        .ToHandleChecked();
+    Handle<SeqTwoByteString> flat =
+        isolate->factory()
+            ->NewRawTwoByteString(length, allocation)
+            .ToHandleChecked();
     DisallowHeapAllocation no_gc;
     WriteToFlat(*cons, flat->GetChars(no_gc), 0, length);
     result = flat;
@@ -61,6 +65,66 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
   cons->set_second(isolate, ReadOnlyRoots(isolate).empty_string());
   DCHECK(result->IsFlat());
   return result;
+}
+
+namespace {
+
+template <class StringClass>
+void MigrateExternalStringResource(Isolate* isolate, String from, String to) {
+  StringClass cast_from = StringClass::cast(from);
+  StringClass cast_to = StringClass::cast(to);
+  const typename StringClass::Resource* to_resource = cast_to->resource();
+  if (to_resource == nullptr) {
+    // |to| is a just-created internalized copy of |from|. Migrate the resource.
+    cast_to->SetResource(isolate, cast_from->resource());
+    // Zap |from|'s resource pointer to reflect the fact that |from| has
+    // relinquished ownership of its resource.
+    isolate->heap()->UpdateExternalString(
+        from, ExternalString::cast(from)->ExternalPayloadSize(), 0);
+    cast_from->SetResource(isolate, nullptr);
+  } else if (to_resource != cast_from->resource()) {
+    // |to| already existed and has its own resource. Finalize |from|.
+    isolate->heap()->FinalizeExternalString(from);
+  }
+}
+
+}  // namespace
+
+void String::MakeThin(Isolate* isolate, String internalized) {
+  DisallowHeapAllocation no_gc;
+  DCHECK_NE(*this, internalized);
+  DCHECK(internalized->IsInternalizedString());
+
+  if (this->IsExternalString()) {
+    if (internalized->IsExternalOneByteString()) {
+      MigrateExternalStringResource<ExternalOneByteString>(isolate, *this,
+                                                           internalized);
+    } else if (internalized->IsExternalTwoByteString()) {
+      MigrateExternalStringResource<ExternalTwoByteString>(isolate, *this,
+                                                           internalized);
+    } else {
+      // If the external string is duped into an existing non-external
+      // internalized string, free its resource (it's about to be rewritten
+      // into a ThinString below).
+      isolate->heap()->FinalizeExternalString(*this);
+    }
+  }
+
+  int old_size = this->Size();
+  isolate->heap()->NotifyObjectLayoutChange(*this, old_size, no_gc);
+  bool one_byte = internalized->IsOneByteRepresentation();
+  Handle<Map> map = one_byte ? isolate->factory()->thin_one_byte_string_map()
+                             : isolate->factory()->thin_string_map();
+  DCHECK_GE(old_size, ThinString::kSize);
+  this->synchronized_set_map(*map);
+  ThinString thin = ThinString::cast(*this);
+  thin->set_actual(internalized);
+  Address thin_end = thin->address() + ThinString::kSize;
+  int size_delta = old_size - ThinString::kSize;
+  if (size_delta != 0) {
+    Heap* heap = isolate->heap();
+    heap->CreateFillerObjectAt(thin_end, size_delta, ClearRecordedSlots::kNo);
+  }
 }
 
 bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
@@ -74,8 +138,8 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
     // Assert that the resource and the string are equivalent.
     DCHECK(static_cast<size_t>(this->length()) == resource->length());
     ScopedVector<uc16> smart_chars(this->length());
-    String::WriteToFlat(*this, smart_chars.start(), 0, this->length());
-    DCHECK_EQ(0, memcmp(smart_chars.start(), resource->data(),
+    String::WriteToFlat(*this, smart_chars.begin(), 0, this->length());
+    DCHECK_EQ(0, memcmp(smart_chars.begin(), resource->data(),
                         resource->length() * sizeof(smart_chars[0])));
   }
 #endif                      // DEBUG
@@ -100,7 +164,7 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // strings in generated code, we need to bailout to runtime.
   Map new_map;
   ReadOnlyRoots roots(heap);
-  if (size < ExternalString::kSize) {
+  if (size < ExternalString::kSizeOfAllExternalStrings) {
     if (is_internalized) {
       new_map = roots.uncached_external_internalized_string_map();
     } else {
@@ -142,12 +206,12 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
     DCHECK(static_cast<size_t>(this->length()) == resource->length());
     if (this->IsTwoByteRepresentation()) {
       ScopedVector<uint16_t> smart_chars(this->length());
-      String::WriteToFlat(*this, smart_chars.start(), 0, this->length());
-      DCHECK(String::IsOneByte(smart_chars.start(), this->length()));
+      String::WriteToFlat(*this, smart_chars.begin(), 0, this->length());
+      DCHECK(String::IsOneByte(smart_chars.begin(), this->length()));
     }
     ScopedVector<char> smart_chars(this->length());
-    String::WriteToFlat(*this, smart_chars.start(), 0, this->length());
-    DCHECK_EQ(0, memcmp(smart_chars.start(), resource->data(),
+    String::WriteToFlat(*this, smart_chars.begin(), 0, this->length());
+    DCHECK_EQ(0, memcmp(smart_chars.begin(), resource->data(),
                         resource->length() * sizeof(smart_chars[0])));
   }
 #endif                      // DEBUG
@@ -174,7 +238,7 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   // strings in generated code, we need to bailout to runtime.
   Map new_map;
   ReadOnlyRoots roots(heap);
-  if (size < ExternalString::kSize) {
+  if (size < ExternalString::kSizeOfAllExternalStrings) {
     new_map = is_internalized
                   ? roots.uncached_external_one_byte_internalized_string_map()
                   : roots.uncached_external_one_byte_string_map();
@@ -292,7 +356,6 @@ void String::StringShortPrint(StringStream* accumulator, bool show_details) {
     }
     if (show_details) accumulator->Put('>');
   }
-  return;
 }
 
 void String::PrintUC16(std::ostream& os, int start, int end) {  // NOLINT
@@ -334,7 +397,7 @@ bool String::LooksValid() {
   // basically the same logic as the way we access the heap in the first place.
   MemoryChunk* chunk = MemoryChunk::FromHeapObject(*this);
   // RO_SPACE objects should always be valid.
-  if (chunk->owner()->identity() == RO_SPACE) return true;
+  if (ReadOnlyHeap::Contains(*this)) return true;
   if (chunk->heap() == nullptr) return false;
   return chunk->heap()->Contains(*this);
 }
@@ -530,7 +593,9 @@ void String::WriteToFlat(String src, sinkchar* sink, int f, int t) {
   int from = f;
   int to = t;
   while (true) {
-    DCHECK(0 <= from && from <= to && to <= source->length());
+    DCHECK_LE(0, from);
+    DCHECK_LE(from, to);
+    DCHECK_LE(to, source->length());
     switch (StringShape(source).full_representation_tag()) {
       case kOneByteStringTag | kExternalStringTag: {
         CopyChars(sink, ExternalOneByteString::cast(source)->GetChars() + from,
@@ -761,8 +826,8 @@ bool String::SlowEquals(Isolate* isolate, Handle<String> one,
   String::FlatContent flat2 = two->GetFlatContent(no_gc);
 
   if (flat1.IsOneByte() && flat2.IsOneByte()) {
-    return CompareRawStringContents(flat1.ToOneByteVector().start(),
-                                    flat2.ToOneByteVector().start(),
+    return CompareRawStringContents(flat1.ToOneByteVector().begin(),
+                                    flat2.ToOneByteVector().begin(),
                                     one_length);
   } else {
     for (int i = 0; i < one_length; i++) {
@@ -812,19 +877,19 @@ ComparisonResult String::Compare(Isolate* isolate, Handle<String> x,
     Vector<const uint8_t> x_chars = x_content.ToOneByteVector();
     if (y_content.IsOneByte()) {
       Vector<const uint8_t> y_chars = y_content.ToOneByteVector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
+      r = CompareChars(x_chars.begin(), y_chars.begin(), prefix_length);
     } else {
       Vector<const uc16> y_chars = y_content.ToUC16Vector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
+      r = CompareChars(x_chars.begin(), y_chars.begin(), prefix_length);
     }
   } else {
     Vector<const uc16> x_chars = x_content.ToUC16Vector();
     if (y_content.IsOneByte()) {
       Vector<const uint8_t> y_chars = y_content.ToOneByteVector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
+      r = CompareChars(x_chars.begin(), y_chars.begin(), prefix_length);
     } else {
       Vector<const uc16> y_chars = y_content.ToUC16Vector();
-      r = CompareChars(x_chars.start(), y_chars.start(), prefix_length);
+      r = CompareChars(x_chars.begin(), y_chars.begin(), prefix_length);
     }
   }
   if (r < 0) {
@@ -997,7 +1062,7 @@ MaybeHandle<String> String::GetSubstitution(Isolate* isolate, Match* match,
         break;
       }
       case '<': {  // $<name> - named capture
-        typedef String::Match::CaptureState CaptureState;
+        using CaptureState = String::Match::CaptureState;
 
         if (!match->HasNamedCaptures()) {
           builder.AppendCharacter('$');
@@ -1177,26 +1242,6 @@ Object String::LastIndexOf(Isolate* isolate, Handle<Object> receiver,
   return Smi::FromInt(last_index);
 }
 
-bool String::IsUtf8EqualTo(Vector<const char> str, bool allow_prefix_match) {
-  int slen = length();
-  // Can't check exact length equality, but we can check bounds.
-  int str_len = str.length();
-  if (!allow_prefix_match &&
-      (str_len < slen ||
-       str_len > slen * static_cast<int>(unibrow::Utf8::kMaxEncodedSize))) {
-    return false;
-  }
-
-  int i = 0;
-  unibrow::Utf8Iterator it = unibrow::Utf8Iterator(str);
-  while (i < slen && !it.Done()) {
-    if (Get(i++) != *it) return false;
-    ++it;
-  }
-
-  return (allow_prefix_match || i == slen) && it.Done();
-}
-
 template <>
 bool String::IsEqualTo(Vector<const uint8_t> str) {
   return IsOneByteEqualTo(str);
@@ -1207,16 +1252,28 @@ bool String::IsEqualTo(Vector<const uc16> str) {
   return IsTwoByteEqualTo(str);
 }
 
+bool String::HasOneBytePrefix(Vector<const char> str) {
+  int slen = str.length();
+  if (slen > length()) return false;
+  DisallowHeapAllocation no_gc;
+  FlatContent content = GetFlatContent(no_gc);
+  if (content.IsOneByte()) {
+    return CompareChars(content.ToOneByteVector().begin(), str.begin(), slen) ==
+           0;
+  }
+  return CompareChars(content.ToUC16Vector().begin(), str.begin(), slen) == 0;
+}
+
 bool String::IsOneByteEqualTo(Vector<const uint8_t> str) {
   int slen = length();
   if (str.length() != slen) return false;
   DisallowHeapAllocation no_gc;
   FlatContent content = GetFlatContent(no_gc);
   if (content.IsOneByte()) {
-    return CompareChars(content.ToOneByteVector().start(), str.start(), slen) ==
+    return CompareChars(content.ToOneByteVector().begin(), str.begin(), slen) ==
            0;
   }
-  return CompareChars(content.ToUC16Vector().start(), str.start(), slen) == 0;
+  return CompareChars(content.ToUC16Vector().begin(), str.begin(), slen) == 0;
 }
 
 bool String::IsTwoByteEqualTo(Vector<const uc16> str) {
@@ -1225,11 +1282,39 @@ bool String::IsTwoByteEqualTo(Vector<const uc16> str) {
   DisallowHeapAllocation no_gc;
   FlatContent content = GetFlatContent(no_gc);
   if (content.IsOneByte()) {
-    return CompareChars(content.ToOneByteVector().start(), str.start(), slen) ==
+    return CompareChars(content.ToOneByteVector().begin(), str.begin(), slen) ==
            0;
   }
-  return CompareChars(content.ToUC16Vector().start(), str.start(), slen) == 0;
+  return CompareChars(content.ToUC16Vector().begin(), str.begin(), slen) == 0;
 }
+
+namespace {
+
+template <typename Char>
+uint32_t HashString(String string, size_t start, int length, uint64_t seed) {
+  DisallowHeapAllocation no_gc;
+
+  if (length > String::kMaxHashCalcLength) {
+    return StringHasher::GetTrivialHash(length);
+  }
+
+  std::unique_ptr<Char[]> buffer;
+  const Char* chars;
+
+  if (string.IsConsString()) {
+    DCHECK_EQ(0, start);
+    DCHECK(!string.IsFlat());
+    buffer.reset(new Char[length]);
+    String::WriteToFlat(string, buffer.get(), 0, length);
+    chars = buffer.get();
+  } else {
+    chars = string.GetChars<Char>(no_gc) + start;
+  }
+
+  return StringHasher::HashSequentialString<Char>(chars, length, seed);
+}
+
+}  // namespace
 
 uint32_t String::ComputeAndSetHash() {
   DisallowHeapAllocation no_gc;
@@ -1237,8 +1322,27 @@ uint32_t String::ComputeAndSetHash() {
   DCHECK(!HasHashCode());
 
   // Store the hash code in the object.
-  uint32_t field =
-      IteratingStringHasher::Hash(*this, HashSeed(GetReadOnlyRoots()));
+  uint64_t seed = HashSeed(GetReadOnlyRoots());
+  size_t start = 0;
+  String string = *this;
+  if (string.IsSlicedString()) {
+    SlicedString sliced = SlicedString::cast(string);
+    start = sliced.offset();
+    string = sliced.parent();
+  }
+  if (string.IsConsString() && string.IsFlat()) {
+    string = ConsString::cast(string).first();
+  }
+  if (string.IsThinString()) {
+    string = ThinString::cast(string).actual();
+    if (start == 0) {
+      set_hash_field(string.hash_field());
+      return hash_field() >> kHashShift;
+    }
+  }
+  uint32_t field = string.IsOneByteRepresentation()
+                       ? HashString<uint8_t>(string, start, length(), seed)
+                       : HashString<uint16_t>(string, start, length(), seed);
   set_hash_field(field);
 
   // Check the hash code is there.
@@ -1322,7 +1426,7 @@ void SeqTwoByteString::clear_padding() {
          SizeFor(length()) - data_size);
 }
 
-uint16_t ConsString::ConsStringGet(int index) {
+uint16_t ConsString::Get(int index) {
   DCHECK(index >= 0 && index < this->length());
 
   // Check for a flattened cons string
@@ -1351,9 +1455,9 @@ uint16_t ConsString::ConsStringGet(int index) {
   UNREACHABLE();
 }
 
-uint16_t ThinString::ThinStringGet(int index) { return actual()->Get(index); }
+uint16_t ThinString::Get(int index) { return actual()->Get(index); }
 
-uint16_t SlicedString::SlicedStringGet(int index) {
+uint16_t SlicedString::Get(int index) {
   return parent()->Get(offset() + index);
 }
 
@@ -1372,7 +1476,7 @@ FlatStringReader::FlatStringReader(Isolate* isolate, Vector<const char> input)
       str_(nullptr),
       is_one_byte_(true),
       length_(input.length()),
-      start_(input.start()) {}
+      start_(input.begin()) {}
 
 void FlatStringReader::PostGarbageCollection() {
   if (str_ == nullptr) return;
@@ -1384,9 +1488,9 @@ void FlatStringReader::PostGarbageCollection() {
   DCHECK(content.IsFlat());
   is_one_byte_ = content.IsOneByte();
   if (is_one_byte_) {
-    start_ = content.ToOneByteVector().start();
+    start_ = content.ToOneByteVector().begin();
   } else {
-    start_ = content.ToUC16Vector().start();
+    start_ = content.ToUC16Vector().begin();
   }
 }
 
@@ -1521,6 +1625,9 @@ String ConsStringIterator::NextLeaf(bool* blew_stack) {
   }
   UNREACHABLE();
 }
+
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::WriteToFlat(
+    String source, uint16_t* sink, int from, int to);
 
 }  // namespace internal
 }  // namespace v8

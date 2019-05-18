@@ -5,8 +5,8 @@
 #include "src/contexts.h"
 
 #include "src/ast/modules.h"
-#include "src/bootstrapper.h"
 #include "src/debug/debug.h"
+#include "src/init/bootstrapper.h"
 #include "src/isolate-inl.h"
 #include "src/objects/module-inl.h"
 
@@ -500,7 +500,7 @@ STATIC_ASSERT(NativeContext::kNativeContextOffset ==
               Context::OffsetOfElementAt(NativeContext::NATIVE_CONTEXT_INDEX));
 
 STATIC_ASSERT(NativeContext::kStartOfStrongFieldsOffset ==
-              Context::OffsetOfElementAt(0));
+              Context::OffsetOfElementAt(-1));
 STATIC_ASSERT(NativeContext::kStartOfWeakFieldsOffset ==
               Context::OffsetOfElementAt(NativeContext::FIRST_WEAK_SLOT));
 STATIC_ASSERT(NativeContext::kMicrotaskQueueOffset ==

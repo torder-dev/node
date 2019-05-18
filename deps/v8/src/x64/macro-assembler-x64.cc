@@ -7,7 +7,6 @@
 #include "src/base/bits.h"
 #include "src/base/division-by-constant.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/bootstrapper.h"
 #include "src/callable.h"
 #include "src/code-factory.h"
 #include "src/counters.h"
@@ -16,6 +15,7 @@
 #include "src/frames-inl.h"
 #include "src/globals.h"
 #include "src/heap/heap-inl.h"  // For MemoryChunk.
+#include "src/init/bootstrapper.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/objects/smi.h"
@@ -293,6 +293,13 @@ void TurboAssembler::DecompressTaggedSigned(Register destination,
   RecordComment("]");
 }
 
+void TurboAssembler::DecompressTaggedSigned(Register destination,
+                                            Register source) {
+  RecordComment("[ DecompressTaggedSigned");
+  movsxlq(destination, source);
+  RecordComment("]");
+}
+
 void TurboAssembler::DecompressTaggedPointer(Register destination,
                                              Operand field_operand) {
   RecordComment("[ DecompressTaggedPointer");
@@ -301,23 +308,52 @@ void TurboAssembler::DecompressTaggedPointer(Register destination,
   RecordComment("]");
 }
 
+void TurboAssembler::DecompressTaggedPointer(Register destination,
+                                             Register source) {
+  RecordComment("[ DecompressTaggedPointer");
+  movsxlq(destination, source);
+  addq(destination, kRootRegister);
+  RecordComment("]");
+}
+
+void TurboAssembler::DecompressRegisterAnyTagged(Register destination,
+                                                 Register scratch) {
+  if (kUseBranchlessPtrDecompression) {
+    // Branchlessly compute |masked_root|:
+    // masked_root = HAS_SMI_TAG(destination) ? 0 : kRootRegister;
+    STATIC_ASSERT((kSmiTagSize == 1) && (kSmiTag < 32));
+    Register masked_root = scratch;
+    movl(masked_root, destination);
+    andl(masked_root, Immediate(kSmiTagMask));
+    negq(masked_root);
+    andq(masked_root, kRootRegister);
+    // Now this add operation will either leave the value unchanged if it is
+    // a smi or add the isolate root if it is a heap object.
+    addq(destination, masked_root);
+  } else {
+    Label done;
+    JumpIfSmi(destination, &done);
+    addq(destination, kRootRegister);
+    bind(&done);
+  }
+}
+
 void TurboAssembler::DecompressAnyTagged(Register destination,
                                          Operand field_operand,
                                          Register scratch) {
   DCHECK(!AreAliased(destination, scratch));
   RecordComment("[ DecompressAnyTagged");
   movsxlq(destination, field_operand);
-  // Branchlessly compute |masked_root|:
-  // masked_root = HAS_SMI_TAG(destination) ? 0 : kRootRegister;
-  STATIC_ASSERT((kSmiTagSize == 1) && (kSmiTag < 32));
-  Register masked_root = scratch;
-  movl(masked_root, destination);
-  andl(masked_root, Immediate(kSmiTagMask));
-  negq(masked_root);
-  andq(masked_root, kRootRegister);
-  // Now this add operation will either leave the value unchanged if it is a smi
-  // or add the isolate root if it is a heap object.
-  addq(destination, masked_root);
+  DecompressRegisterAnyTagged(destination, scratch);
+  RecordComment("]");
+}
+
+void TurboAssembler::DecompressAnyTagged(Register destination, Register source,
+                                         Register scratch) {
+  DCHECK(!AreAliased(destination, scratch));
+  RecordComment("[ DecompressAnyTagged");
+  movsxlq(destination, source);
+  DecompressRegisterAnyTagged(destination, scratch);
   RecordComment("]");
 }
 
@@ -379,6 +415,29 @@ void TurboAssembler::RestoreRegisters(RegList registers) {
   }
 }
 
+void TurboAssembler::CallEphemeronKeyBarrier(Register object, Register address,
+                                             SaveFPRegsMode fp_mode) {
+  EphemeronKeyBarrierDescriptor descriptor;
+  RegList registers = descriptor.allocatable_registers();
+
+  SaveRegisters(registers);
+
+  Register object_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kObject));
+  Register slot_parameter(descriptor.GetRegisterParameter(
+      EphemeronKeyBarrierDescriptor::kSlotAddress));
+  Register fp_mode_parameter(
+      descriptor.GetRegisterParameter(EphemeronKeyBarrierDescriptor::kFPMode));
+
+  MovePair(slot_parameter, address, object_parameter, object);
+  Smi smi_fm = Smi::FromEnum(fp_mode);
+  Move(fp_mode_parameter, smi_fm);
+  Call(isolate()->builtins()->builtin_handle(Builtins::kEphemeronKeyBarrier),
+       RelocInfo::CODE_TARGET);
+
+  RestoreRegisters(registers);
+}
+
 void TurboAssembler::CallRecordWriteStub(
     Register object, Register address,
     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode) {
@@ -419,21 +478,7 @@ void TurboAssembler::CallRecordWriteStub(
   // Prepare argument registers for calling RecordWrite
   // slot_parameter   <= address
   // object_parameter <= object
-  if (slot_parameter != object) {
-    // Normal case
-    Move(slot_parameter, address);
-    Move(object_parameter, object);
-  } else if (object_parameter != address) {
-    // Only slot_parameter and object are the same register
-    // object_parameter <= object
-    // slot_parameter   <= address
-    Move(object_parameter, object);
-    Move(slot_parameter, address);
-  } else {
-    // slot_parameter   \/ address
-    // object_parameter /\ object
-    xchgq(slot_parameter, object_parameter);
-  }
+  MovePair(slot_parameter, address, object_parameter, object);
 
   Smi smi_rsa = Smi::FromEnum(remembered_set_action);
   Smi smi_fm = Smi::FromEnum(fp_mode);
@@ -499,10 +544,6 @@ void MacroAssembler::RecordWrite(Register object, Register address,
   CallRecordWriteStub(object, address, remembered_set_action, fp_mode);
 
   bind(&done);
-
-  // Count number of write barriers in generated code.
-  isolate()->counters()->write_barriers_static()->Increment();
-  IncrementCounter(isolate()->counters()->write_barriers_dynamic(), 1);
 
   // Clobber clobbered registers when running with the debug-code flag
   // turned on to provoke errors.
@@ -682,7 +723,7 @@ int TurboAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
   // R12 to r15 are callee save on all platforms.
   if (fp_mode == kSaveFPRegs) {
     int delta = kDoubleSize * XMMRegister::kNumRegisters;
-    subq(rsp, Immediate(delta));
+    AllocateStackSpace(delta);
     for (int i = 0; i < XMMRegister::kNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
       Movsd(Operand(rsp, i * kDoubleSize), reg);
@@ -1297,6 +1338,25 @@ void TurboAssembler::Move(Register dst, Register src) {
   }
 }
 
+void TurboAssembler::MovePair(Register dst0, Register src0, Register dst1,
+                              Register src1) {
+  if (dst0 != src1) {
+    // Normal case: Writing to dst0 does not destroy src1.
+    Move(dst0, src0);
+    Move(dst1, src1);
+  } else if (dst1 != src0) {
+    // Only dst0 and src1 are the same register,
+    // but writing to dst1 does not destroy src0.
+    Move(dst1, src1);
+    Move(dst0, src0);
+  } else {
+    // dst0 == src1, and dst1 == src0, a swap is required:
+    // dst0 \/ src0
+    // dst1 /\ src1
+    xchgq(dst0, dst1);
+  }
+}
+
 void TurboAssembler::MoveNumber(Register dst, double value) {
   int32_t smi;
   if (DoubleToSmiInteger(value, &smi)) {
@@ -1417,7 +1477,13 @@ void TurboAssembler::Move(Register result, Handle<HeapObject> object,
       return;
     }
   }
-  movq(result, Immediate64(object.address(), rmode));
+  if (RelocInfo::IsCompressedEmbeddedObject(rmode)) {
+    int compressed_embedded_object_index = AddCompressedEmbeddedObject(object);
+    movl(result, Immediate(compressed_embedded_object_index, rmode));
+  } else {
+    DCHECK(RelocInfo::IsFullEmbeddedObject(rmode));
+    movq(result, Immediate64(object.address(), rmode));
+  }
 }
 
 void TurboAssembler::Move(Operand dst, Handle<HeapObject> object,
@@ -2107,6 +2173,9 @@ void MacroAssembler::IncrementCounter(StatsCounter* counter, int value) {
   if (FLAG_native_code_counters && counter->Enabled()) {
     Operand counter_operand =
         ExternalReferenceAsOperand(ExternalReference::Create(counter));
+    // This operation has to be exactly 32-bit wide in case the external
+    // reference table redirects the counter to a uint32_t dummy_stats_counter_
+    // field.
     if (value == 1) {
       incl(counter_operand);
     } else {
@@ -2121,6 +2190,9 @@ void MacroAssembler::DecrementCounter(StatsCounter* counter, int value) {
   if (FLAG_native_code_counters && counter->Enabled()) {
     Operand counter_operand =
         ExternalReferenceAsOperand(ExternalReference::Create(counter));
+    // This operation has to be exactly 32-bit wide in case the external
+    // reference table redirects the counter to a uint32_t dummy_stats_counter_
+    // field.
     if (value == 1) {
       decl(counter_operand);
     } else {
@@ -2408,6 +2480,38 @@ void TurboAssembler::LeaveFrame(StackFrame::Type type) {
   popq(rbp);
 }
 
+#ifdef V8_OS_WIN
+void TurboAssembler::AllocateStackSpace(Register bytes_scratch) {
+  // In windows, we cannot increment the stack size by more than one page
+  // (minimum page size is 4KB) without accessing at least one byte on the
+  // page. Check this:
+  // https://msdn.microsoft.com/en-us/library/aa227153(v=vs.60).aspx.
+  Label check_offset;
+  Label touch_next_page;
+  jmp(&check_offset);
+  bind(&touch_next_page);
+  subq(rsp, Immediate(kStackPageSize));
+  // Just to touch the page, before we increment further.
+  movb(Operand(rsp, 0), Immediate(0));
+  subq(bytes_scratch, Immediate(kStackPageSize));
+
+  bind(&check_offset);
+  cmpq(bytes_scratch, Immediate(kStackPageSize));
+  j(greater, &touch_next_page);
+
+  subq(rsp, bytes_scratch);
+}
+
+void TurboAssembler::AllocateStackSpace(int bytes) {
+  while (bytes > kStackPageSize) {
+    subq(rsp, Immediate(kStackPageSize));
+    movb(Operand(rsp, 0), Immediate(0));
+    bytes -= kStackPageSize;
+  }
+  subq(rsp, Immediate(bytes));
+}
+#endif
+
 void MacroAssembler::EnterExitFramePrologue(bool save_rax,
                                             StackFrame::Type frame_type) {
   DCHECK(frame_type == StackFrame::EXIT ||
@@ -2422,12 +2526,10 @@ void MacroAssembler::EnterExitFramePrologue(bool save_rax,
   pushq(rbp);
   movq(rbp, rsp);
 
-  // Reserve room for entry stack pointer and push the code object.
+  // Reserve room for entry stack pointer.
   Push(Immediate(StackFrame::TypeToMarker(frame_type)));
   DCHECK_EQ(-2 * kSystemPointerSize, ExitFrameConstants::kSPOffset);
   Push(Immediate(0));  // Saved entry sp, patched before call.
-  Move(kScratchRegister, CodeObject(), RelocInfo::EMBEDDED_OBJECT);
-  Push(kScratchRegister);  // Accessed from ExitFrame::code_slot.
 
   // Save the frame pointer and the context in top.
   if (save_rax) {
@@ -2455,7 +2557,7 @@ void MacroAssembler::EnterExitFrameEpilogue(int arg_stack_space,
   if (save_doubles) {
     int space = XMMRegister::kNumRegisters * kDoubleSize +
                 arg_stack_space * kSystemPointerSize;
-    subq(rsp, Immediate(space));
+    AllocateStackSpace(space);
     int offset = -ExitFrameConstants::kFixedFrameSizeFromFp;
     const RegisterConfiguration* config = RegisterConfiguration::Default();
     for (int i = 0; i < config->num_allocatable_double_registers(); ++i) {
@@ -2464,7 +2566,7 @@ void MacroAssembler::EnterExitFrameEpilogue(int arg_stack_space,
       Movsd(Operand(rbp, offset - ((i + 1) * kDoubleSize)), reg);
     }
   } else if (arg_stack_space > 0) {
-    subq(rsp, Immediate(arg_stack_space * kSystemPointerSize));
+    AllocateStackSpace(arg_stack_space * kSystemPointerSize);
   }
 
   // Get the required frame alignment for the OS.
@@ -2595,7 +2697,7 @@ void TurboAssembler::PrepareCallCFunction(int num_arguments) {
   DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
   int argument_slots_on_stack =
       ArgumentStackSlotsForCFunctionCall(num_arguments);
-  subq(rsp, Immediate((argument_slots_on_stack + 1) * kSystemPointerSize));
+  AllocateStackSpace((argument_slots_on_stack + 1) * kSystemPointerSize);
   andq(rsp, Immediate(-frame_alignment));
   movq(Operand(rsp, argument_slots_on_stack * kSystemPointerSize),
        kScratchRegister);

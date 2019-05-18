@@ -49,7 +49,7 @@ class Immediate {
   RelocInfo::Mode rmode() const { return rmode_; }
 
  private:
-  void InitializeHandle(Handle<HeapObject> value);
+  V8_EXPORT_PRIVATE void InitializeHandle(Handle<HeapObject> value);
 
   int64_t value_;
   RelocInfo::Mode rmode_;
@@ -338,6 +338,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This might need to be temporarily encoded as an offset into code_targets_.
   inline Handle<Code> code_target_object_handle_at(Address pc);
 
+  inline Handle<HeapObject> compressed_embedded_object_handle_at(Address pc);
+
   // Returns the target address for a runtime function for the call encoded
   // at 'pc'.
   // Runtime entries can be temporarily encoded as the offset between the
@@ -345,10 +347,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // code_range_start field), in order to be encodable as we generate the code,
   // before it is moved into the code space.
   inline Address runtime_entry_at(Address pc);
-
-  // Return the code target address at a call site from the return address of
-  // that call in the instruction stream.
-  inline static Address target_address_from_return_address(Address pc);
 
   // This sets the branch destination. 'location' here can be either the pc of
   // an immediate branch or the address of an entry in the constant pool.

@@ -113,7 +113,7 @@ class Immediate {
   inline explicit Immediate(const ExternalReference& ext)
       : Immediate(ext.address(), RelocInfo::EXTERNAL_REFERENCE) {}
   inline explicit Immediate(Handle<HeapObject> handle)
-      : Immediate(handle.address(), RelocInfo::EMBEDDED_OBJECT) {}
+      : Immediate(handle.address(), RelocInfo::FULL_EMBEDDED_OBJECT) {}
   inline explicit Immediate(Smi value)
       : Immediate(static_cast<intptr_t>(value.ptr())) {}
 
@@ -126,7 +126,7 @@ class Immediate {
 
   bool is_heap_object_request() const {
     DCHECK_IMPLIES(is_heap_object_request_,
-                   rmode_ == RelocInfo::EMBEDDED_OBJECT ||
+                   rmode_ == RelocInfo::FULL_EMBEDDED_OBJECT ||
                        rmode_ == RelocInfo::CODE_TARGET);
     return is_heap_object_request_;
   }
@@ -142,7 +142,8 @@ class Immediate {
   }
 
   bool is_embedded_object() const {
-    return !is_heap_object_request() && rmode() == RelocInfo::EMBEDDED_OBJECT;
+    return !is_heap_object_request() &&
+           rmode() == RelocInfo::FULL_EMBEDDED_OBJECT;
   }
 
   Handle<HeapObject> embedded_object() const {
@@ -401,10 +402,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       Address pc, Address constant_pool, Address target,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
-  // Return the code target address at a call site from the return address
-  // of that call in the instruction stream.
-  inline static Address target_address_from_return_address(Address pc);
-
   // This sets the branch destination (which is in the instruction on x86).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
@@ -420,10 +417,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   static constexpr int kSpecialTargetSize = kSystemPointerSize;
-
-  // Distance between the address of the code target in the call instruction
-  // and the return address
-  static constexpr int kCallTargetAddressOffset = kSystemPointerSize;
 
   // One byte opcode for test al, 0xXX.
   static constexpr byte kTestAlByte = 0xA8;
@@ -751,7 +744,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void jmp(Register reg) { jmp(Operand(reg)); }
   void jmp(Operand adr);
   void jmp(Handle<Code> code, RelocInfo::Mode rmode);
-  // unconditionoal jump relative to the current address. Low-level rountine,
+  // Unconditional jump relative to the current address. Low-level routine,
   // use with caution!
   void jmp_rel(int offset);
 
@@ -856,8 +849,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   void ucomiss(XMMRegister dst, XMMRegister src) { ucomiss(dst, Operand(src)); }
   void ucomiss(XMMRegister dst, Operand src);
-  void movaps(XMMRegister dst, XMMRegister src);
-  void movups(XMMRegister dst, XMMRegister src);
+  void movaps(XMMRegister dst, XMMRegister src) { movaps(dst, Operand(src)); }
+  void movaps(XMMRegister dst, Operand src);
+  void movups(XMMRegister dst, XMMRegister src) { movups(dst, Operand(src)); }
   void movups(XMMRegister dst, Operand src);
   void movups(Operand dst, XMMRegister src);
   void shufps(XMMRegister dst, XMMRegister src, byte imm8);
@@ -869,6 +863,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   void andps(XMMRegister dst, Operand src);
   void andps(XMMRegister dst, XMMRegister src) { andps(dst, Operand(src)); }
+  void andnps(XMMRegister dst, Operand src);
+  void andnps(XMMRegister dst, XMMRegister src) { andnps(dst, Operand(src)); }
   void xorps(XMMRegister dst, Operand src);
   void xorps(XMMRegister dst, XMMRegister src) { xorps(dst, Operand(src)); }
   void orps(XMMRegister dst, Operand src);
@@ -895,6 +891,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void maxps(XMMRegister dst, XMMRegister src) { maxps(dst, Operand(src)); }
 
   void cmpps(XMMRegister dst, Operand src, uint8_t cmp);
+  void cmpps(XMMRegister dst, XMMRegister src, uint8_t cmp) {
+    cmpps(dst, Operand(src), cmp);
+  }
 #define SSE_CMP_P(instr, imm8)                       \
   void instr##ps(XMMRegister dst, XMMRegister src) { \
     cmpps(dst, Operand(src), imm8);                  \
@@ -1317,9 +1316,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vhaddps(XMMRegister dst, XMMRegister src1, Operand src2) {
     vinstr(0x7C, dst, src1, src2, kF2, k0F, kWIG);
   }
-  void vmovaps(XMMRegister dst, XMMRegister src) {
-    vps(0x28, dst, xmm0, Operand(src));
-  }
+  void vmovaps(XMMRegister dst, XMMRegister src) { vmovaps(dst, Operand(src)); }
+  void vmovaps(XMMRegister dst, Operand src) { vps(0x28, dst, xmm0, src); }
+  void vmovups(XMMRegister dst, XMMRegister src) { vmovups(dst, Operand(src)); }
+  void vmovups(XMMRegister dst, Operand src) { vps(0x10, dst, xmm0, src); }
   void vshufps(XMMRegister dst, XMMRegister src1, XMMRegister src2, byte imm8) {
     vshufps(dst, src1, Operand(src2), imm8);
   }
@@ -1497,6 +1497,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
 #define PACKED_OP_LIST(V) \
   V(and, 0x54)            \
+  V(andn, 0x55)           \
+  V(or, 0x56)             \
   V(xor, 0x57)            \
   V(add, 0x58)            \
   V(mul, 0x59)            \

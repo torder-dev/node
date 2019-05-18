@@ -8,6 +8,7 @@
 #include "src/base/flags.h"
 #include "src/compiler/frame-states.h"
 #include "src/compiler/graph-reducer.h"
+#include "src/compiler/node-properties.h"
 #include "src/deoptimize-reason.h"
 
 namespace v8 {
@@ -28,6 +29,7 @@ struct FieldAccess;
 class JSGraph;
 class JSHeapBroker;
 class JSOperatorBuilder;
+class NodeProperties;
 class SimplifiedOperatorBuilder;
 
 // Performs strength reduction on {JSConstruct} and {JSCall} nodes,
@@ -36,7 +38,7 @@ class V8_EXPORT_PRIVATE JSCallReducer final : public AdvancedReducer {
  public:
   // Flags that control the mode of operation.
   enum Flag { kNoFlags = 0u, kBailoutOnUninitialized = 1u << 0 };
-  typedef base::Flags<Flag> Flags;
+  using Flags = base::Flags<Flag>;
 
   JSCallReducer(Editor* editor, JSGraph* jsgraph, JSHeapBroker* broker,
                 Flags flags, CompilationDependencies* dependencies)

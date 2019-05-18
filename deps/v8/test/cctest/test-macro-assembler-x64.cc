@@ -34,7 +34,9 @@
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/objects/smi.h"
+#include "src/ostreams.h"
 #include "src/simulator.h"
+#include "src/x64/assembler-x64-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/common/assembler-tester.h"
 
@@ -421,6 +423,59 @@ void TestSmiIndex(MacroAssembler* masm, Label* exit, int id, int x) {
     __ j(not_equal, exit);
     __ incq(rax);
   }
+}
+
+TEST(EmbeddedObj) {
+#ifdef V8_COMPRESS_POINTERS
+  FLAG_always_compact = true;
+  v8::V8::Initialize();
+
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope handles(isolate);
+  auto buffer = AllocateAssemblerBuffer();
+  MacroAssembler assembler(isolate, v8::internal::CodeObjectRequired::kYes,
+                           buffer->CreateView());
+
+  MacroAssembler* masm = &assembler;
+  EntryCode(masm);
+  Label exit;
+  Handle<HeapObject> old_array = isolate->factory()->NewFixedArray(2000);
+  Handle<HeapObject> my_array = isolate->factory()->NewFixedArray(1000);
+  __ Move(rcx, my_array, RelocInfo::COMPRESSED_EMBEDDED_OBJECT);
+  __ Move(rax, old_array, RelocInfo::FULL_EMBEDDED_OBJECT);
+  __ bind(&exit);
+  ExitCode(masm);
+  __ ret(0);
+
+  CodeDesc desc;
+  masm->GetCode(isolate, &desc);
+  Handle<Code> code = Factory::CodeBuilder(isolate, desc, Code::STUB).Build();
+#ifdef OBJECT_PRINT
+  StdoutStream os;
+  code->Print(os);
+#endif
+  typedef Address(myF0)();
+  auto f = GeneratedCode<myF0>::FromAddress(isolate, code->entry());
+  Object result = Object(f.Call());
+  CHECK_EQ(old_array->ptr(), result.ptr());
+
+  // Collect garbage to ensure reloc info can be walked by the heap.
+  CcTest::CollectAllGarbage();
+  CcTest::CollectAllGarbage();
+  CcTest::CollectAllGarbage();
+
+  // Test the user-facing reloc interface.
+  const int mode_mask = RelocInfo::EmbeddedObjectModeMask();
+  for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
+    RelocInfo::Mode mode = it.rinfo()->rmode();
+    if (RelocInfo::IsCompressedEmbeddedObject(mode)) {
+      CHECK_EQ(*my_array, it.rinfo()->target_object());
+    } else {
+      CHECK(RelocInfo::IsFullEmbeddedObject(mode));
+      CHECK_EQ(*old_array, it.rinfo()->target_object());
+    }
+  }
+#endif  // V8_COMPRESS_POINTERS
 }
 
 TEST(SmiIndex) {
@@ -810,7 +865,7 @@ TEST(OperandOffset) {
 
 void TestFloat32x4Abs(MacroAssembler* masm, Label* exit, float x, float y,
                       float z, float w) {
-  __ subq(rsp, Immediate(kSimd128Size));
+  __ AllocateStackSpace(kSimd128Size);
 
   __ Move(xmm1, x);
   __ Movss(Operand(rsp, 0 * kFloatSize), xmm1);
@@ -847,7 +902,7 @@ void TestFloat32x4Abs(MacroAssembler* masm, Label* exit, float x, float y,
 
 void TestFloat32x4Neg(MacroAssembler* masm, Label* exit, float x, float y,
                       float z, float w) {
-  __ subq(rsp, Immediate(kSimd128Size));
+  __ AllocateStackSpace(kSimd128Size);
 
   __ Move(xmm1, x);
   __ Movss(Operand(rsp, 0 * kFloatSize), xmm1);
@@ -883,7 +938,7 @@ void TestFloat32x4Neg(MacroAssembler* masm, Label* exit, float x, float y,
 }
 
 void TestFloat64x2Abs(MacroAssembler* masm, Label* exit, double x, double y) {
-  __ subq(rsp, Immediate(kSimd128Size));
+  __ AllocateStackSpace(kSimd128Size);
 
   __ Move(xmm1, x);
   __ Movsd(Operand(rsp, 0 * kDoubleSize), xmm1);
@@ -907,7 +962,7 @@ void TestFloat64x2Abs(MacroAssembler* masm, Label* exit, double x, double y) {
 }
 
 void TestFloat64x2Neg(MacroAssembler* masm, Label* exit, double x, double y) {
-  __ subq(rsp, Immediate(kSimd128Size));
+  __ AllocateStackSpace(kSimd128Size);
 
   __ Move(xmm1, x);
   __ Movsd(Operand(rsp, 0 * kDoubleSize), xmm1);
