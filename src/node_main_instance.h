@@ -89,5 +89,10 @@ class NodeMainInstance {
 
 }  // namespace node
 
+namespace node {
+typedef bool (*QodeInjectedFunc)(Environment* env);
+NODE_EXTERN void InjectQode(QodeInjectedFunc init, QodeInjectedFunc runLoop);
+}  // namespace node
+
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 #endif  // SRC_NODE_MAIN_INSTANCE_H_

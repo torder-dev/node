@@ -5,6 +5,16 @@
 #include "util-inl.h"
 
 namespace node {
+static QodeInjectedFunc qode_init = nullptr;
+static QodeInjectedFunc qode_run_loop = nullptr;
+
+void InjectQode(QodeInjectedFunc init, QodeInjectedFunc runLoop) {
+  qode_init = init;
+  qode_run_loop = runLoop;
+}
+}  // namespace node
+
+namespace node {
 
 using v8::Context;
 using v8::HandleScope;
@@ -103,6 +113,10 @@ int NodeMainInstance::Run() {
   CHECK_NOT_NULL(env);
   Context::Scope context_scope(env->context());
 
+  if (qode_init) {
+    qode_init(env.get());
+  }
+
   if (exit_code == 0) {
     {
       AsyncCallbackScope callback_scope(env.get());
@@ -117,8 +131,11 @@ int NodeMainInstance::Run() {
       env->performance_state()->Mark(
           node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_START);
       do {
-        uv_run(env->event_loop(), UV_RUN_DEFAULT);
-
+        if (qode_run_loop) {
+          qode_run_loop(env.get());
+        } else {
+          uv_run(env->event_loop(), UV_RUN_DEFAULT);
+        }
         per_process::v8_platform.DrainVMTasks(isolate_);
 
         more = uv_loop_alive(env->event_loop());
