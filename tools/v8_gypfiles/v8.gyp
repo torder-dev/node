@@ -740,11 +740,11 @@
             ['v8_enable_embedded_builtins', {
               # In this case we use `embedded_variant "Default"`
               # and `suffix = ''` for the template `embedded${suffix}.S`.
-              'outputs': ['<(INTERMEDIATE_DIR)/embedded.asm'],
+              'outputs': ['<(INTERMEDIATE_DIR)/embedded.S'],
               'variables': {
                 'mksnapshot_flags': [
                   '--embedded_variant', 'Default',
-                  '--embedded_src', '<(INTERMEDIATE_DIR)/embedded.asm',
+                  '--embedded_src', '<(INTERMEDIATE_DIR)/embedded.S',
                 ],
               },
             }, {
