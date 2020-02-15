@@ -1545,6 +1545,31 @@ def configure_intl(o):
     var  = 'icu_src_%s' % i
     path = '../../%s/source/%s' % (icu_full_path, icu_src[i])
     icu_config['variables'][var] = glob_to_var('tools/icu', path, 'patches/%s/source/%s' % (icu_ver_major, icu_src[i]) )
+  # calculate platform-specific genccode args
+  # print("platform %s, flavor %s" % (sys.platform, flavor))
+  # if sys.platform == 'darwin':
+  #   shlib_suffix = '%s.dylib'
+  # elif sys.platform.startswith('aix'):
+  #   shlib_suffix = '%s.a'
+  # else:
+  #   shlib_suffix = 'so.%s'
+  if flavor == 'win':
+    icu_config['variables']['icu_asm_ext'] = 'obj'
+    icu_config['variables']['icu_asm_opts'] = [ '-o' ]
+  elif with_intl == 'small-icu' or options.cross_compiling:
+    icu_config['variables']['icu_asm_ext'] = 'c'
+    icu_config['variables']['icu_asm_opts'] = []
+  elif flavor == 'mac':
+    icu_config['variables']['icu_asm_ext'] = 'S'
+    icu_config['variables']['icu_asm_opts'] = [ '-a', 'gcc-darwin' ]
+  elif sys.platform.startswith('aix'):
+    icu_config['variables']['icu_asm_ext'] = 'S'
+    icu_config['variables']['icu_asm_opts'] = [ '-a', 'xlc' ]
+  else:
+    # assume GCC-compatible asm is OK
+    icu_config['variables']['icu_asm_ext'] = 'S'
+    icu_config['variables']['icu_asm_opts'] = [ '-a', 'gcc' ]
+
   # write updated icu_config.gypi with a bunch of paths
   write(icu_config_name, do_not_edit +
         pprint.pformat(icu_config, indent=2) + '\n')
