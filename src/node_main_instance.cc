@@ -122,10 +122,8 @@ int NodeMainInstance::Run() {
   CHECK_NOT_NULL(env);
   Context::Scope context_scope(env->context());
 
-  if (qode::qode_init) {
-    qode::qode_init(env.get());
-  }
-
+  qode::qode_init(env.get());
+  
   if (exit_code == 0) {
     {
       InternalCallbackScope callback_scope(
@@ -144,11 +142,8 @@ int NodeMainInstance::Run() {
       env->performance_state()->Mark(
           node::performance::NODE_PERFORMANCE_MILESTONE_LOOP_START);
       do {
-         if (qode::qode_run_gui_loop) {
-          qode::qode_run_gui_loop();
-        } else {
-          uv_run(env->event_loop(), UV_RUN_DEFAULT);
-        }
+        qode::qode_run_gui_loop();
+        // uv_run(env->event_loop(), UV_RUN_DEFAULT);
 
         per_process::v8_platform.DrainVMTasks(isolate_);
 

@@ -5,16 +5,19 @@
 namespace qode {
     typedef bool (*QodeInjectedInitFunc)(node::Environment* env);
     extern QodeInjectedInitFunc qode_init;
-    extern void InjectQodeInit(QodeInjectedInitFunc init);
+    void InjectQodeInit(QodeInjectedInitFunc init);
+
+    typedef bool (*QodeMainRunLoopFunc)();
+    extern QodeMainRunLoopFunc qode_run_gui_loop;
+    void InjectQodeRunLoop(QodeMainRunLoopFunc runLoop);
+
+    typedef int (*QodeCustomRunLoopFunc)();
+    extern QodeCustomRunLoopFunc custom_run_loop;
 } // namespace qode
 
 // qode api headers for integration
 namespace qode {
     extern int qode_argc;
     extern char **qode_argv;
-    typedef bool (*QodeInjectedRunLoopFunc)();
-    extern QodeInjectedRunLoopFunc qode_run_uv_loop_once;
-    extern QodeInjectedRunLoopFunc qode_run_gui_loop;
-    extern void InjectQodeRunLoop(QodeInjectedRunLoopFunc runLoop);
-    extern void InjectQodeRunUvLoopOnce(QodeInjectedRunLoopFunc runUvLoopOnce);
+    extern void InjectCustomRunLoop(QodeCustomRunLoopFunc customRunLoop);
 }  // namespace qode
